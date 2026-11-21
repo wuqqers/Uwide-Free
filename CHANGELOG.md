@@ -1,3 +1,7 @@
+## 0.4.69
+
+- YouTube Shorts excluded from video framing and player controls.
+
 # Değişiklikler
 
 ## 0.4.68
