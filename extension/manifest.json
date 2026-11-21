@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Uwide Free — Video Toolkit",
+  "version": "0.4.68",
+  "description": "Ücretsiz video kadrajı, sabit renk ayarları ve özel profiller.",
+  "permissions": [
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "minimum_chrome_version": "119",
+  "author": "Wuqqers",
+  "homepage_url": "https://www.omerkayaekici.com/tr/",
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
