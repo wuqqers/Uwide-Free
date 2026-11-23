@@ -1,9 +1,9 @@
 /* Storage model shared by the service worker and extension pages. */
 globalThis.UwideSettings=(()=>{
-  const defaults=Object.freeze({enabled:true,mode:'automatic',autoPicture:false,zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,ratio:'auto',cropAspect:'source',customAspect:2.39,stretch:1,autoBars:false,frameTrim:0,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0,sharpen:0,hdr:0,ambience:false,glow:24,blur:32,smoothing:75,audioPulse:false,profile:'custom',theme:'dark',showPlayerButton:true,playerWheelZoom:false});
-  const limits={zoom:[1,2.5],wheelScale:[1,2.5],shortcutScale:[1,2.5],panX:[-50,50],panY:[-50,50],customAspect:[0.5,4],stretch:[1,1.6],frameTrim:[0,25],brightness:[50,150],contrast:[50,150],shadowLift:[0,30],saturation:[0,200],vibrance:[0,100],glow:[0,60],blur:[0,100],smoothing:[0,900]};
+  const defaults=Object.freeze({enabled:true,mode:'automatic',autoPicture:false,zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,ratio:'auto',cropAspect:'source',customAspect:2.39,stretch:1,edgeStretch:0,autoBars:false,frameTrim:0,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0,sharpen:0,hdr:0,ambience:false,glow:24,blur:32,smoothing:75,audioPulse:false,profile:'custom',theme:'dark',showPlayerButton:true,playerWheelZoom:false});
+  const limits={zoom:[1,2.5],wheelScale:[1,2.5],shortcutScale:[1,2.5],panX:[-50,50],panY:[-50,50],customAspect:[0.5,4],stretch:[1,1.6],edgeStretch:[0,100],frameTrim:[0,25],brightness:[50,150],contrast:[50,150],shadowLift:[0,30],saturation:[0,200],vibrance:[0,100],sharpen:[0,100],hdr:[0,100],glow:[0,60],blur:[0,100],smoothing:[0,900]};
   const enums={mode:['automatic','manual'],ratio:['auto','contain','fill'],cropAspect:['source','16:9','16:10','18:9','21:9','32:9','4:3','1:1','custom'],theme:['dark','light','ocean','glass']};
-  const categories={framing:['mode','zoom','wheelScale','shortcutScale','panX','panY','ratio','cropAspect','customAspect','stretch','frameTrim'],bars:['autoBars'],picture:['autoPicture','brightness','contrast','shadowLift','saturation','vibrance','sharpen','hdr','ambience','glow','blur','smoothing','audioPulse']};
+  const categories={framing:['mode','zoom','wheelScale','shortcutScale','panX','panY','ratio','cropAspect','customAspect','stretch','edgeStretch','frameTrim'],bars:['autoBars'],picture:['autoPicture','brightness','contrast','shadowLift','saturation','vibrance','sharpen','hdr','ambience','glow','blur','smoothing','audioPulse']};
   const categoryFor=key=>Object.keys(categories).find(category=>categories[category].includes(key))||null;
   const categoryValues=(values,category)=>Object.fromEntries(categories[category].filter(key=>Object.hasOwn(values,key)).map(key=>[key,values[key]]));
   function sitePolicy(value){
@@ -16,7 +16,6 @@ globalThis.UwideSettings=(()=>{
     for(const key of Object.keys(defaults)){
       const value=input[key];if(value===undefined)continue;
       if(key==='ambience'||key==='audioPulse'){out[key]=false;continue;}
-      if(key==='sharpen'||key==='hdr'){out[key]=0;continue;}
       if(limits[key]){if(typeof value==='number'&&Number.isFinite(value))out[key]=Math.max(limits[key][0],Math.min(limits[key][1],value));}
       else if(enums[key]){if(enums[key].includes(value))out[key]=value;}
       else if(typeof defaults[key]==='boolean'){if(typeof value==='boolean')out[key]=value;}
@@ -100,32 +99,42 @@ globalThis.UwideSettings=(()=>{
     }
     async function write(ctx,changes){
       const data=await state(),current=resolve(ctx,data),patch=sanitize(changes),key=keyFor(ctx);
-      const groupNames=Object.keys(categories), general=Object.fromEntries(Object.entries(patch).filter(([name])=>!categoryFor(name)));
-      if(current.scope==='global')await storage.sync.set(general);
-      if(current.scope==='device'&&Object.keys(general).length)await storage.local.set({deviceSettings:{...sanitize(data.local.deviceSettings),...general}});
-      if(current.scope==='site'&&Object.keys(general).length)await storage.local.set({siteOverrides:{...data.local.siteOverrides,[ctx.host]:{...sanitize(data.local.siteOverrides[ctx.host]),...general}}});
-      if(current.scope==='tab'&&Object.keys(general).length)await storage.session.set({tabOverrides:{...data.session.tabOverrides,[key]:{...sanitize(data.session.tabOverrides[key]),...general}}});
-      if(current.scope==='video'&&Object.keys(general).length){if(!ctx.videoToken)throw new Error('Hedef video hazır değil.');const existing=data.session.videoOverrides[key]?.token===ctx.videoToken?sanitize(data.session.videoOverrides[key].values):{};await storage.session.set({videoOverrides:{...data.session.videoOverrides,[key]:{token:ctx.videoToken,values:{...existing,...general}}}});}
-      for(const category of groupNames){
+      const syncChanges={},localChanges={},sessionChanges={};
+      const mergeGeneral=(scope,fields)=>{
+        if(scope==='global')Object.assign(syncChanges,fields);
+        if(scope==='device')localChanges.deviceSettings={...sanitize(localChanges.deviceSettings??data.local.deviceSettings),...fields};
+        if(scope==='site')localChanges.siteOverrides={...data.local.siteOverrides,[ctx.host]:{...sanitize(localChanges.siteOverrides?.[ctx.host]??data.local.siteOverrides[ctx.host]),...fields}};
+        if(scope==='tab')sessionChanges.tabOverrides={...data.session.tabOverrides,[key]:{...sanitize(sessionChanges.tabOverrides?.[key]??data.session.tabOverrides[key]),...fields}};
+        if(scope==='video'){
+          if(!ctx.videoToken)throw new Error('Hedef video hazır değil.');
+          const entry=sessionChanges.videoOverrides?.[key]??data.session.videoOverrides[key];
+          const existing=entry?.token===ctx.videoToken?sanitize(entry.values):{};
+          sessionChanges.videoOverrides={...data.session.videoOverrides,[key]:{token:ctx.videoToken,values:{...existing,...fields}}};
+        }
+      };
+      const general=Object.fromEntries(Object.entries(patch).filter(([name])=>!categoryFor(name)));
+      if(Object.keys(general).length)mergeGeneral(current.scope,general);
+      for(const category of Object.keys(categories)){
         const categoryPatch=categoryValues(patch,category);if(!Object.keys(categoryPatch).length)continue;
         const selection=data.session.categoryScopeSelections[key]?.[category],selected=selection==='inherit'?null:selection,scope=selected||current.scope;
-        if(!selected){
-          const combined={...categoryPatch};
-          if(scope==='global')await storage.sync.set(categoryPatch);
-          if(scope==='device')await storage.local.set({deviceSettings:{...sanitize(data.local.deviceSettings),...combined}});
-          if(scope==='site')await storage.local.set({siteOverrides:{...data.local.siteOverrides,[ctx.host]:{...sanitize(data.local.siteOverrides[ctx.host]),...combined}}});
-          if(scope==='tab')await storage.session.set({tabOverrides:{...data.session.tabOverrides,[key]:{...sanitize(data.session.tabOverrides[key]),...combined}}});
-          if(scope==='video'){if(!ctx.videoToken)throw new Error('Hedef video hazır değil.');const existing=data.session.videoOverrides[key]?.token===ctx.videoToken?sanitize(data.session.videoOverrides[key].values):{};await storage.session.set({videoOverrides:{...data.session.videoOverrides,[key]:{token:ctx.videoToken,values:{...existing,...combined}}}});}
-          continue;
-        }
+        if(!selected){mergeGeneral(scope,categoryPatch);continue;}
         const combined=categoryPatch;
-        if(scope==='global')await storage.sync.set(categoryPatch);
-        if(scope==='device')await storage.local.set({categoryDeviceSettings:{...data.local.categoryDeviceSettings,[category]:{...sanitize(data.local.categoryDeviceSettings[category]),...combined}}});
-        if(scope==='site')await storage.local.set({categorySiteOverrides:{...data.local.categorySiteOverrides,[ctx.host]:{...data.local.categorySiteOverrides[ctx.host],[category]:{...sanitize(data.local.categorySiteOverrides[ctx.host]?.[category]),...combined}}}});
-        if(scope==='supported')await storage.local.set({categorySupportedSettings:{...data.local.categorySupportedSettings,[category]:{...sanitize(data.local.categorySupportedSettings[category]),...combined}}});
-        if(scope==='tab')await storage.session.set({categoryTabOverrides:{...data.session.categoryTabOverrides,[key]:{...data.session.categoryTabOverrides[key],[category]:{...sanitize(data.session.categoryTabOverrides[key]?.[category]),...combined}}}});
-        if(scope==='video'){if(!ctx.videoToken)throw new Error('Hedef video hazır değil.');const existing=data.session.categoryVideoOverrides[key]?.[category]?.token===ctx.videoToken?sanitize(data.session.categoryVideoOverrides[key][category].values):{};await storage.session.set({categoryVideoOverrides:{...data.session.categoryVideoOverrides,[key]:{...data.session.categoryVideoOverrides[key],[category]:{token:ctx.videoToken,values:{...existing,...combined}}}}});}
+        if(scope==='global')Object.assign(syncChanges,combined);
+        if(scope==='device'){const groups=localChanges.categoryDeviceSettings??data.local.categoryDeviceSettings;localChanges.categoryDeviceSettings={...groups,[category]:{...sanitize(groups[category]),...combined}};}
+        if(scope==='site'){const sites=localChanges.categorySiteOverrides??data.local.categorySiteOverrides,site=sites[ctx.host]||{};localChanges.categorySiteOverrides={...sites,[ctx.host]:{...site,[category]:{...sanitize(site[category]),...combined}}};}
+        if(scope==='supported'){const groups=localChanges.categorySupportedSettings??data.local.categorySupportedSettings;localChanges.categorySupportedSettings={...groups,[category]:{...sanitize(groups[category]),...combined}};}
+        if(scope==='tab'){const tabs=sessionChanges.categoryTabOverrides??data.session.categoryTabOverrides,tab=tabs[key]||{};sessionChanges.categoryTabOverrides={...tabs,[key]:{...tab,[category]:{...sanitize(tab[category]),...combined}}};}
+        if(scope==='video'){
+          if(!ctx.videoToken)throw new Error('Hedef video hazır değil.');
+          const videos=sessionChanges.categoryVideoOverrides??data.session.categoryVideoOverrides,tab=videos[key]||{},entry=tab[category],existing=entry?.token===ctx.videoToken?sanitize(entry.values):{};
+          sessionChanges.categoryVideoOverrides={...videos,[key]:{...tab,[category]:{token:ctx.videoToken,values:{...existing,...combined}}}};
+        }
       }
+      const writes=[];
+      if(Object.keys(syncChanges).length)writes.push(storage.sync.set(syncChanges));
+      if(Object.keys(localChanges).length)writes.push(storage.local.set(localChanges));
+      if(Object.keys(sessionChanges).length)writes.push(storage.session.set(sessionChanges));
+      await Promise.all(writes);
       return read(ctx);
     }
     async function clear(ctx,category=null){

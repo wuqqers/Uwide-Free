@@ -1,6 +1,6 @@
 /* Independent preset model. Profiles never enable dynamic light effects. */
 globalThis.UwideProfiles = (() => {
-  const ranges = {zoom:[1,2.5],wheelScale:[1,2.5],shortcutScale:[1,2.5],panX:[-50,50],panY:[-50,50],customAspect:[0.5,4],stretch:[1,1.6],frameTrim:[0,25],brightness:[50,150],contrast:[50,150],shadowLift:[0,30],saturation:[0,200],vibrance:[0,100]};
+  const ranges = {zoom:[1,2.5],wheelScale:[1,2.5],shortcutScale:[1,2.5],panX:[-50,50],panY:[-50,50],customAspect:[0.5,4],stretch:[1,1.6],edgeStretch:[0,100],frameTrim:[0,25],brightness:[50,150],contrast:[50,150],shadowLift:[0,30],saturation:[0,200],vibrance:[0,100],sharpen:[0,100],hdr:[0,100]};
   function snapshot(input) {
     const out = {};
     for (const [key,[min,max]] of Object.entries(ranges)) {
@@ -9,12 +9,15 @@ globalThis.UwideProfiles = (() => {
     // Profiles saved before the approximate shadow control existed must not
     // inherit a nonzero value from the currently active video settings.
     if (!Object.hasOwn(out,'shadowLift')) out.shadowLift=0;
+    if (!Object.hasOwn(out,'edgeStretch')) out.edgeStretch=0;
+    if (!Object.hasOwn(out,'sharpen')) out.sharpen=0;
     if (['automatic','manual'].includes(input.mode)) out.mode=input.mode;
     if (['auto','contain','fill'].includes(input.ratio)) out.ratio=input.ratio;
     if (['source','16:9','16:10','18:9','21:9','32:9','4:3','1:1','custom'].includes(input.cropAspect)) out.cropAspect=input.cropAspect;
     if (typeof input.autoBars === 'boolean') out.autoBars=input.autoBars;
     // Keep master enable, theme, storage scope and autoPicture as user choices.
-    return {...out,sharpen:0,hdr:0,ambience:false,audioPulse:false};
+    if (!Object.hasOwn(out,'hdr')) out.hdr=0;
+    return {...out,ambience:false,audioPulse:false};
   }
   function make(name, values, id=crypto.randomUUID()) {
     name=String(name).trim();
@@ -28,7 +31,7 @@ globalThis.UwideProfiles = (() => {
     game:{brightness:108,contrast:120,saturation:125,vibrance:0},
     music:{brightness:100,contrast:100,saturation:125,vibrance:15},
     none:{brightness:100,contrast:100,saturation:100,vibrance:0},
-    fullFrame:{mode:'automatic',ratio:'contain',cropAspect:'source',zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,stretch:1,frameTrim:0,autoBars:false,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0}
+    fullFrame:{mode:'automatic',ratio:'contain',cropAspect:'source',zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,stretch:1,edgeStretch:0,frameTrim:0,autoBars:false,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0,hdr:0}
   };
   const format='uwide-free-profiles',version=1,maxBytes=128*1024;
   function exportBundle(profiles){

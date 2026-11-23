@@ -1,6 +1,10 @@
 
-.ui-tabs{position:relative;min-width:0}.ui-tab-input{position:absolute!important;width:1px!important;height:1px!important;clip-path:inset(50%);overflow:hidden}
-.ui-tab-labels{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:4px;background:var(--field);border-radius:12px;margin:12px 0}
-.ui-tab-labels label{display:block;text-align:center;margin:0;padding:9px 4px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:650;color:var(--muted)}
-.ui-pane{display:none}.ui-tab-pages{max-height:min(410px,calc(100dvh - 240px));overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--line) transparent;padding:0 3px 2px 0}
-#ui-tab-0:checked ~ .ui-tab-pages .ui-pane-0{display:block}#ui-tab-0:checked ~ .ui-tab-labels label[for="ui-tab-0"]{background:var(--surface);color:var(--accent);box-shadow:0 1px 4px #0002}#ui-tab-0:focus-visible ~ .ui-tab-labels label[for="ui-tab-0"]{outline:2px solid var(--accent);outline-offset:-2px}#ui-tab-1:checked ~ .ui-tab-pages .ui-pane-1{display:block}#ui-tab-1:checked ~ .ui-tab-labels label[for="ui-tab-1"]{background:var(--surface);color:var(--accent);box-shadow:0 1px 4px #0002}#ui-tab-1:focus-visible ~ .ui-tab-labels label[for="ui-tab-1"]{outline:2px solid var(--accent);outline-offset:-2px}#ui-tab-2:checked ~ .ui-tab-pages .ui-pane-2{display:block}#ui-tab-2:checked ~ .ui-tab-labels label[for="ui-tab-2"]{background:var(--surface);color:var(--accent);box-shadow:0 1px 4px #0002}#ui-tab-2:focus-visible ~ .ui-tab-labels label[for="ui-tab-2"]{outline:2px solid var(--accent);outline-offset:-2px}
+.ui-tabs{position:relative;min-width:0}
+.ui-tab-input{position:absolute!important;inline-size:1px!important;block-size:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip-path:inset(50%);white-space:nowrap!important;border:0!important}
+.ui-tab-labels{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:4px;border:1px solid var(--line);border-radius:13px;background:var(--field);margin:12px 0}
+.ui-tab-labels label{display:grid;place-items:center;min-block-size:40px;margin:0;padding:8px 4px;border:1px solid transparent;border-radius:9px;color:var(--muted);cursor:pointer;text-align:center;font-size:12px;font-weight:700}
+.ui-pane{display:none;min-width:0}
+.ui-tab-pages{max-block-size:min(440px,calc(100dvh - 230px));overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--line) transparent;padding:0 3px 4px 0}
+#ui-tab-0:checked~.ui-tab-pages .ui-pane-0,#ui-tab-1:checked~.ui-tab-pages .ui-pane-1,#ui-tab-2:checked~.ui-tab-pages .ui-pane-2{display:block}
+#ui-tab-0:checked~.ui-tab-labels label[for="ui-tab-0"],#ui-tab-1:checked~.ui-tab-labels label[for="ui-tab-1"],#ui-tab-2:checked~.ui-tab-labels label[for="ui-tab-2"]{color:var(--accent);background:var(--surface);border-color:var(--line);box-shadow:inset 0 -2px var(--accent)}
+#ui-tab-0:focus-visible~.ui-tab-labels label[for="ui-tab-0"],#ui-tab-1:focus-visible~.ui-tab-labels label[for="ui-tab-1"],#ui-tab-2:focus-visible~.ui-tab-labels label[for="ui-tab-2"]{outline:2px solid var(--accent);outline-offset:2px}

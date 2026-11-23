@@ -5,11 +5,12 @@
   if(window.__uwideFreeInstalled===contentVersion)return;
   if(window.__uwideFreeInstalled){window.__uwideFreeUpgradeRequired=true;return;}
   window.__uwideFreeInstalled=contentVersion;
-  const defaults = { enabled:true, mode:'automatic',autoPicture:false, zoom:1, wheelScale:1,shortcutScale:1, panX:0, panY:0, ratio:'auto',cropAspect:'source',customAspect:2.39, stretch:1, autoBars:false, frameTrim:0, brightness:100, contrast:100, shadowLift:0, saturation:100, vibrance:0, sharpen:0, hdr:0, ambience:false, glow:24, blur:32, smoothing:75, audioPulse:false, profile:'custom', theme:'dark', showPlayerButton:true, playerWheelZoom:false };
+  const defaults = { enabled:true, mode:'automatic',autoPicture:false, zoom:1, wheelScale:1,shortcutScale:1, panX:0, panY:0, ratio:'auto',cropAspect:'source',customAspect:2.39, stretch:1, edgeStretch:0, autoBars:false, frameTrim:0, brightness:100, contrast:100, shadowLift:0, saturation:100, vibrance:0, sharpen:0, hdr:0, ambience:false, glow:24, blur:32, smoothing:75, audioPulse:false, profile:'custom', theme:'dark', showPlayerButton:true, playerWheelZoom:false };
   // Wait for persisted settings before changing a video, avoiding a brief
   // default-mode render when a different site or global setting is saved.
   let settings={...defaults,enabled:false},globalSettings={...defaults},siteHost=location.hostname, applying=false, layoutFrame=0, resizeObservedVideo=null,lastPlayerWheelAt=0,comparisonVideo=null;
   const managed=new Map();
+  const pictureFilters=new WeakMap();
   const monitoredAnimations=new WeakSet();
   const roots=new Set([document]), rootObservers=new Map();
   const playerPanels=new Set();
@@ -35,8 +36,27 @@
   }
   function candidates(){scanOpenRoots();const found=new Set();for(const root of roots)for(const v of root.querySelectorAll('video'))if(v.isConnected&&v.videoWidth>0&&visible(v))found.add(v);return [...found];}
   function rank(v){const playing=!v.paused&&!v.ended;const area=Math.min(v.offsetWidth*v.offsetHeight,1e9);return area*(playing?1.25:1)+(v.currentTime>0?1e5:0);}
-  let selectedVideo=null;
-  function activeVideo(){const available=candidates().sort((a,b)=>rank(b)-rank(a)),best=available[0]||null;if(!best){selectedVideo=null;return null;}if(selectedVideo&&available.includes(selectedVideo)&&rank(best)<rank(selectedVideo)*1.4)return selectedVideo;selectedVideo=best;return best;}
+  let selectedVideo=null,selectionMissingSince=null,selectionPage='';
+  let focusHold=false,focusReturnUntil=0,focusRepairs=0,focusMedia='';
+  function holdsFocusFrame(){return !!(selectedVideo?.isConnected&&selectionPage===location.href&&selectedVideo.currentSrc===focusMedia&&(focusHold||performance.now()<focusReturnUntil));}
+  function lockFocusFrame(){focusHold=true;focusMedia=selectedVideo?.currentSrc||'';focusRepairs=0;focusReturnUntil=0;smoothPresentationUntil=0;if(fullscreenSettleTimer){clearTimeout(fullscreenSettleTimer);fullscreenSettleTimer=0;}const state=selectedVideo&&managed.get(selectedVideo);if(state)set(selectedVideo,'transition','none');}
+  function resumeFocusFrame(){if(!focusHold)focusMedia=selectedVideo?.currentSrc||'';focusHold=false;focusReturnUntil=performance.now()+3000;focusRepairs=0;smoothPresentationUntil=0;scheduleLayout();}
+  function activeVideo(){
+    // Browsers and players can temporarily hide the same video during app/mode
+    // switches. Keep its identity and locked crop through that short gap.
+    if(selectedVideo?.isConnected&&selectionPage===location.href&&(document.hidden||holdsFocusFrame()))return selectedVideo;
+    const available=candidates().sort((a,b)=>rank(b)-rank(a)),best=available[0]||null;
+    if(!best){
+      if(selectedVideo?.isConnected&&selectionPage===location.href){
+        selectionMissingSince??=performance.now();
+        if(performance.now()-selectionMissingSince<1200)return selectedVideo;
+      }
+      selectedVideo=null;selectionMissingSince=null;return null;
+    }
+    selectionMissingSince=null;
+    if(selectedVideo&&available.includes(selectedVideo)&&rank(best)<rank(selectedVideo)*1.4)return selectedVideo;
+    selectedVideo=best;selectionPage=location.href;return best;
+  }
   function isYouTubeShorts(){return /(^|\.)youtube\.com$/i.test(location.hostname)&&/^\/shorts(?:\/|$)/i.test(location.pathname);}
   function remember(v){if(managed.has(v))return managed.get(v);const props={};for(const p of originalProps)props[p]={value:v.style.getPropertyValue(p),priority:v.style.getPropertyPriority(p)};const computed=getComputedStyle(v),origin=computed.transformOrigin.split(/\s+/),width=Math.max(1,v.offsetWidth),height=Math.max(1,v.offsetHeight);const originPercent=origin.slice(0,2).map((part,index)=>{const value=parseFloat(part),size=index?height:width;return Number.isFinite(value)?`${value/size*100}%`:part;}).join(' ');const m={props,expected:{},baseTransform:computed.transform,baseFilter:computed.filter,baseObjectPosition:computed.objectPosition,baseTransformOrigin:originPercent,clipFailed:false};managed.set(v,m);return m;}
   function sameInline(v,p,entry){return v.style.getPropertyValue(p)===entry.value&&v.style.getPropertyPriority(p)===entry.priority;}
@@ -58,11 +78,31 @@
     const message=!siteAllowed?'Bu site izinli siteler listesinde değil. Eklemek için araç çubuğundaki Uwide simgesini açın.':conflict?`Video görünümünde stil çakışması algılandı (${conflict}). Karşılıklı yazmayı ve olası görüntü bozulmasını önlemek için Uwide bu videoda bekliyor.`:'';
     for(const host of playerPanels){if(host.__uwfVideo!==video)continue;const node=host.shadowRoot?.querySelector('.compat-status');if(node){if(node.textContent!==message)node.textContent=message;node.hidden=!message;}}
   }
+  function isOwnedTransformTransition(video,animation){
+    const state=managed.get(video);
+    return animation.transitionProperty==='transform'&&state?.expected.transform&&state.expected.transition?.value.startsWith('transform 240ms')&&sameInline(video,'transform',state.expected.transform)&&sameInline(video,'transition',state.expected.transition);
+  }
+  function rebasePresentationStyles(video,state){
+    const changed=Object.entries(state.expected).filter(([property,expected])=>!sameInline(video,property,expected)).map(([property])=>property);
+    if(!changed.length)return;
+    // Do not restore the other owned properties: their baselines and crop remain
+    // valid. Cancel only our transition before reading a changed author transform.
+    for(const animation of video.getAnimations?.()||[]){
+      if(animation.transitionProperty==='transform'&&state.expected.transition?.value.startsWith('transform 240ms')&&sameInline(video,'transition',state.expected.transition))animation.cancel();
+    }
+    for(const property of changed){state.props[property]={value:video.style.getPropertyValue(property),priority:video.style.getPropertyPriority(property)};delete state.expected[property];}
+    const computed=getComputedStyle(video);
+    if(changed.includes('transform'))state.baseTransform=computed.transform;
+    if(changed.includes('filter'))state.baseFilter=computed.filter;
+    if(changed.includes('object-position'))state.baseObjectPosition=computed.objectPosition;
+    if(changed.includes('transform-origin'))state.baseTransformOrigin=computed.transformOrigin.split(/\s+/).slice(0,2).map((part,index)=>`${parseFloat(part)/Math.max(1,index?video.offsetHeight:video.offsetWidth)*100}%`).join(' ');
+    state.styleConflict=null;state.animationConflict=null;
+  }
   function animatedStyleProperties(video){
     const propertyNames={transform:'transform','transform-origin':'transformOrigin',filter:'filter','clip-path':'clipPath','object-fit':'objectFit','object-position':'objectPosition',opacity:'opacity'};
     const active=new Set();
     try{for(const animation of video.getAnimations?.()||[]){
-      const effect=animation.effect;if(!effect||animation.playState==='idle')continue;
+      const effect=animation.effect;if(!effect||animation.playState==='idle'||isOwnedTransformTransition(video,animation))continue;
       if(animation.playState==='finished'&&!['forwards','both'].includes(effect.getTiming?.().fill))continue;
       if(!monitoredAnimations.has(animation)&&typeof animation.addEventListener==='function'){
         monitoredAnimations.add(animation);
@@ -83,6 +123,59 @@
     return false;
   }
   function renderGlow(v){set(v,'box-shadow','none');}
+  function createEdgeStretchMap(video,strength,fit,targetWidth=video.offsetWidth,scaleX=1){
+    const width=Math.max(1,Math.round(video.offsetWidth)),height=Math.max(1,Math.round(video.offsetHeight)),videoWidth=video.videoWidth,videoHeight=video.videoHeight;
+    const signature=[width,height,videoWidth,videoHeight,fit,strength,Math.round(targetWidth),Math.round(scaleX*1000)].join(':');
+    if(strength<=0||videoWidth<1||videoHeight<1)return {signature,width,height,scale:0,data:null};
+    const containScale=Math.min(width/videoWidth,height/videoHeight);
+    const sourceWidth=fit==='contain'?videoWidth*containScale:width;
+    const sourceLeft=(width-sourceWidth)/2;
+    const outerGap=Math.max(0,(targetWidth/Math.max(.01,scaleX)-width)/2);
+    const available=sourceLeft+outerGap;
+    if(available<1||sourceWidth<1)return {signature,width,height,scale:0,data:null};
+    // A monotonic tanh map keeps the middle close to 1:1 and spends more
+    // distortion near the edges. The overall width is capped at 1.6×.
+    const extension=Math.min(available,sourceWidth*.3)*strength/100;
+    if(extension<.25)return {signature,width,height,scale:0,data:null};
+    const destinationLeft=sourceLeft-extension,destinationWidth=sourceWidth+2*extension,stretchRatio=destinationWidth/sourceWidth;
+    let low=0,high=20,k=0;
+    if(stretchRatio>1.00001){for(let iteration=0;iteration<24;iteration++){k=(low+high)/2;const ratio=k/(2*Math.tanh(k/2));if(ratio<stretchRatio)low=k;else high=k;}}
+    const mapWidth=Math.min(4096,Math.max(64,Math.ceil(destinationWidth))),canvas=document.createElement('canvas');canvas.width=mapWidth;canvas.height=1;
+    const context=canvas.getContext('2d');if(!context)return {signature,width,height,scale:0,data:null};
+    const image=context.createImageData(mapWidth,1),scale=2*extension;
+    for(let index=0;index<mapWidth;index++){
+      const x=destinationLeft+(index+.5)/mapWidth*destinationWidth,t=(x-destinationLeft)/destinationWidth-.5;
+      const sourceFraction=k>0?.5+.5*Math.tanh(k*t)/Math.tanh(k/2):t+.5;
+      const displacement=sourceLeft+sourceFraction*sourceWidth-x,offset=index*4;
+      image.data[offset]=Math.round(clamp(127.5+displacement/scale*255,0,255));image.data[offset+1]=128;image.data[offset+2]=0;image.data[offset+3]=255;
+    }
+    try{context.putImageData(image,0,0);return {signature,width,height,scale,data:canvas.toDataURL('image/png'),destinationLeft,destinationWidth};}
+    catch{return {signature,width,height,scale:0,data:null};}
+  }
+  function staticPictureFilter(video,shadowValue,sharpValue,vibranceValue=0,highlightValue=0,edgeStrength=0,edgeFit='contain',targetWidth=video.offsetWidth,scaleX=1){
+    const lift=clamp(shadowValue,0,30),sharp=clamp(sharpValue,0,100),vibrance=clamp(vibranceValue,0,100),highlights=clamp(highlightValue,0,100),edge=clamp(edgeStrength,0,100);if(lift===0&&sharp===0&&vibrance===0&&highlights===0&&edge===0)return '';
+    const root=video.getRootNode();let entry=pictureFilters.get(root);
+    if(!entry){
+      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('aria-hidden','true');svg.setAttribute('width','0');svg.setAttribute('height','0');svg.style.cssText='position:fixed;left:-10000px;top:-10000px;width:0;height:0;overflow:hidden;pointer-events:none';
+      const filter=document.createElementNS('http://www.w3.org/2000/svg','filter'),toYcc=document.createElementNS('http://www.w3.org/2000/svg','feColorMatrix'),vibranceTransfer=document.createElementNS('http://www.w3.org/2000/svg','feComponentTransfer'),fromYcc=document.createElementNS('http://www.w3.org/2000/svg','feColorMatrix'),transfer=document.createElementNS('http://www.w3.org/2000/svg','feComponentTransfer'),highlightTransfer=document.createElementNS('http://www.w3.org/2000/svg','feComponentTransfer'),kernel=document.createElementNS('http://www.w3.org/2000/svg','feConvolveMatrix'),edgeImage=document.createElementNS('http://www.w3.org/2000/svg','feImage'),edgeDisplacement=document.createElementNS('http://www.w3.org/2000/svg','feDisplacementMap'),edgeNormalize=document.createElementNS('http://www.w3.org/2000/svg','feComponentTransfer');
+      const neutralY=document.createElementNS('http://www.w3.org/2000/svg','feFuncG');neutralY.setAttribute('type','linear');neutralY.setAttribute('slope','0');neutralY.setAttribute('intercept','.5');edgeNormalize.setAttribute('in','uwfEdgeMap');edgeNormalize.setAttribute('result','uwfNeutralEdgeMap');edgeNormalize.append(neutralY);
+      const vibranceFunctions=Object.fromEntries(['R','G','B'].map(channel=>{const node=document.createElementNS('http://www.w3.org/2000/svg',`feFunc${channel}`);vibranceTransfer.append(node);return[channel,node];}));
+      const functions=Object.fromEntries(['R','G','B'].map(channel=>{const node=document.createElementNS('http://www.w3.org/2000/svg',`feFunc${channel}`);transfer.append(node);return[channel,node];}));
+      const highlightFunctions=Object.fromEntries(['R','G','B'].map(channel=>{const node=document.createElementNS('http://www.w3.org/2000/svg',`feFunc${channel}`);highlightTransfer.append(node);return[channel,node];}));
+      const alpha=document.createElementNS('http://www.w3.org/2000/svg','feFuncA');alpha.setAttribute('type','identity');transfer.append(alpha);
+      const highlightAlpha=document.createElementNS('http://www.w3.org/2000/svg','feFuncA');highlightAlpha.setAttribute('type','identity');highlightTransfer.append(highlightAlpha);
+      const vibranceAlpha=document.createElementNS('http://www.w3.org/2000/svg','feFuncA');vibranceAlpha.setAttribute('type','identity');vibranceTransfer.append(vibranceAlpha);
+      const identity='1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0',toYccMatrix='0.2126 0.7152 0.0722 0 0 -0.114572 -0.385428 0.5 0 0.5 0.5 -0.454153 -0.045847 0 0.5 0 0 0 1 0',fromYccMatrix='1 0 1.5748 0 -0.7874 1 -0.187324 -0.468124 0 0.327724 1 1.8556 0 0 -0.9278 0 0 0 1 0';
+      const id=`uwf-picture-${globalThis.crypto?.randomUUID?.()||Math.random().toString(36).slice(2)}`;filter.id=id;filter.setAttribute('x','-8%');filter.setAttribute('y','-8%');filter.setAttribute('width','116%');filter.setAttribute('height','116%');filter.setAttribute('color-interpolation-filters','sRGB');filter.setAttribute('primitiveUnits','userSpaceOnUse');toYcc.setAttribute('type','matrix');fromYcc.setAttribute('type','matrix');kernel.setAttribute('order','3');kernel.setAttribute('preserveAlpha','true');kernel.setAttribute('edgeMode','duplicate');kernel.setAttribute('result','uwfProcessed');edgeImage.setAttribute('preserveAspectRatio','none');edgeImage.setAttribute('x','0');edgeImage.setAttribute('y','0');edgeImage.setAttribute('width','100%');edgeImage.setAttribute('height','100%');edgeDisplacement.setAttribute('in','uwfProcessed');edgeDisplacement.setAttribute('in2','uwfNeutralEdgeMap');edgeDisplacement.setAttribute('xChannelSelector','R');edgeDisplacement.setAttribute('yChannelSelector','G');edgeDisplacement.setAttribute('scale','0');edgeDisplacement.setAttribute('color-interpolation-filters','sRGB');edgeImage.setAttribute('result','uwfEdgeMap');filter.append(toYcc,vibranceTransfer,fromYcc,transfer,highlightTransfer,kernel);svg.append(filter);(root===document?document.documentElement:root).append(svg);entry={svg,filter,toYcc,fromYcc,vibranceTransfer,vibranceFunctions,transfer,functions,highlightTransfer,highlightFunctions,kernel,edgeImage,edgeNormalize,edgeDisplacement,id,lift:null,sharp:null,vibrance:null,highlights:null,edgeSignature:null};entry.identityMatrix=identity;entry.toYccMatrix=toYccMatrix;entry.fromYccMatrix=fromYccMatrix;pictureFilters.set(root,entry);
+    }
+    if(entry.vibrance!==vibrance){const enabled=vibrance>0;entry.toYcc.setAttribute('values',enabled?entry.toYccMatrix:entry.identityMatrix);entry.fromYcc.setAttribute('values',enabled?entry.fromYccMatrix:entry.identityMatrix);for(const [channel,node] of Object.entries(entry.vibranceFunctions)){if(channel==='R'){node.setAttribute('type','identity');node.removeAttribute('tableValues');continue;}node.setAttribute('type',enabled?'table':'identity');if(enabled){const strength=vibrance/100*.75;const values=Array.from({length:65},(_,index)=>{const x=index/64,y=x+strength*x*(1-x)*(2*x-1);return clamp(y,0,1).toFixed(5);}).join(' ');node.setAttribute('tableValues',values);}else node.removeAttribute('tableValues');}entry.vibrance=vibrance;}
+    if(entry.lift!==lift){const strength=lift/30*.075,values=Array.from({length:17},(_,index)=>{const x=index/16;return Math.min(1,x+strength*(1-x)**3).toFixed(4);}).join(' ');for(const node of Object.values(entry.functions)){node.setAttribute('type',lift?'table':'identity');if(lift)node.setAttribute('tableValues',values);else node.removeAttribute('tableValues');}entry.lift=lift;}
+    if(entry.highlights!==highlights){const strength=highlights/100*.8;for(const node of Object.values(entry.highlightFunctions)){node.setAttribute('type',highlights?'table':'identity');if(highlights){const values=Array.from({length:33},(_,index)=>{const x=index/32;return clamp(x+strength*x**4*(1-x),0,1).toFixed(5);}).join(' ');node.setAttribute('tableValues',values);}else node.removeAttribute('tableValues');}entry.highlights=highlights;}
+    if(entry.sharp!==sharp){const strength=sharp/100*.65,side=-strength,center=1+strength*4;entry.kernel.setAttribute('kernelMatrix',`0 ${side} 0 ${side} ${center} ${side} 0 ${side} 0`);entry.sharp=sharp;}
+    if(edge>0){const signature=[Math.max(1,Math.round(video.offsetWidth)),Math.max(1,Math.round(video.offsetHeight)),video.videoWidth,video.videoHeight,edgeFit,edge,Math.round(targetWidth),Math.round(scaleX*1000)].join(':');if(entry.edgeSignature!==signature){const map=createEdgeStretchMap(video,edge,edgeFit,targetWidth,scaleX);entry.edgeSignature=map.signature;if(map.data&&map.scale>0){if(entry.edgeImage.parentNode!==entry.filter)entry.filter.append(entry.edgeImage,entry.edgeNormalize,entry.edgeDisplacement);entry.filter.setAttribute('x',`${map.destinationLeft/video.offsetWidth*100}%`);entry.filter.setAttribute('width',`${map.destinationWidth/video.offsetWidth*100}%`);entry.edgeImage.setAttribute('x',String(map.destinationLeft));entry.edgeImage.setAttribute('y','0');entry.edgeImage.setAttribute('width',String(map.destinationWidth));entry.edgeImage.setAttribute('height',String(map.height));entry.edgeDisplacement.setAttribute('x',String(map.destinationLeft));entry.edgeDisplacement.setAttribute('y','0');entry.edgeDisplacement.setAttribute('width',String(map.destinationWidth));entry.edgeDisplacement.setAttribute('height',String(map.height));entry.edgeImage.setAttribute('href',map.data);entry.edgeImage.setAttributeNS('http://www.w3.org/1999/xlink','xlink:href',map.data);}else{entry.filter.setAttribute('x','-8%');entry.filter.setAttribute('width','116%');entry.edgeImage.remove();entry.edgeNormalize.remove();entry.edgeDisplacement.remove();}if(entry.edgeScale!==map.scale){entry.edgeDisplacement.setAttribute('scale',String(map.scale));entry.edgeScale=map.scale;}}}
+    else{entry.edgeSignature=null;entry.filter.setAttribute('x','-8%');entry.filter.setAttribute('width','116%');if(entry.edgeScale!==0){entry.edgeDisplacement.setAttribute('scale','0');entry.edgeScale=0;}entry.edgeImage.remove();entry.edgeNormalize.remove();entry.edgeDisplacement.remove();}
+    return `url(#${entry.id})`;
+  }
   function applyCrop(v,autoTop=0,autoBottom=0,autoLeft=0,autoRight=0){const trim=clamp(settings.frameTrim,0,25),top=clamp(trim+(settings.autoBars?autoTop:0),0,45),bottom=clamp(trim+(settings.autoBars?autoBottom:0),0,45),left=clamp(settings.autoBars?autoLeft:0,0,45),right=clamp(settings.autoBars?autoRight:0,0,45);set(v,'clip-path',top>0||bottom>0||left>0||right>0?`inset(${top}% ${right}% ${bottom}% ${left}%)`:'none');}
   function targetBox(v){
     // offsetWidth/Height exclude our CSS transform, so recalculating does not
@@ -93,7 +186,7 @@
     // Use the browser's fullscreen element as the authoritative target. This
     // avoids guessing from the screen's physical pixel resolution (which can
     // differ from CSS pixels under display scaling and browser zoom).
-    const fullscreen=v.getRootNode?.().fullscreenElement||document.fullscreenElement;
+    const fullscreen=v.getRootNode?.().fullscreenElement||document.fullscreenElement||document.webkitFullscreenElement;
     if(fullscreen&&composedContains(fullscreen,v)){
       const r=fullscreen.getBoundingClientRect();
       // clientWidth/clientHeight describe the layout box before transforms.
@@ -168,7 +261,8 @@
       // crop edges; contain preserves the whole frame and may leave letterboxes.
       // Apply each sizing update in one paint; author transitions on the video
       // element can otherwise animate intermediate crop/scale states.
-      set(v,'transition','none');
+      const smooth=performance.now()<smoothPresentationUntil&&!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      set(v,'transition',smooth?'transform 240ms cubic-bezier(.2,.75,.25,1)':'none');
       set(v,'transform',base+'scale('+scale+')');
       set(v,'object-position',state.baseObjectPosition||'50% 50%');set(v,'transform-origin','center center');set(v,'object-fit','contain');
       const clipTop=bars?((h-imageHeight)/2+imageHeight*bars.top/100)/h*100:0;
@@ -176,7 +270,7 @@
       const clipBottom=bars?((h-imageHeight)/2+imageHeight*bars.bottom/100)/h*100:0;
       const clipLeft=bars?((w-imageWidth)/2+imageWidth*bars.left/100)/w*100:0;
       set(v,'clip-path',bars?`inset(${clipTop}% ${clipRight}% ${clipBottom}% ${clipLeft}%)`:'none');
-      const baseFilter=state.baseFilter&&state.baseFilter!=='none'?state.baseFilter:'';const picture=settings.autoPicture?`brightness(${clamp(settings.brightness,0,200)}%) contrast(${clamp(settings.contrast-clamp(settings.shadowLift,0,30),0,200)}%) saturate(${clamp(settings.saturation,0,250)+clamp(settings.vibrance,0,100)}%)`:'';set(v,'filter',[baseFilter,picture].filter(Boolean).join(' ')||'none');set(v,'box-shadow','none');set(v,'will-change','auto');return;
+      const baseFilter=state.baseFilter&&state.baseFilter!=='none'?state.baseFilter:'';const pictureFilter=staticPictureFilter(v,settings.autoPicture?settings.shadowLift:0,settings.autoPicture?settings.sharpen:0,settings.autoPicture?settings.vibrance:0,settings.autoPicture?settings.hdr:0,settings.edgeStretch,'contain',box.width,scale);const picture=settings.autoPicture?`brightness(${clamp(settings.brightness,0,200)}%) contrast(${clamp(settings.contrast,0,200)}%) saturate(${clamp(settings.saturation,0,250)}%)`:'';set(v,'filter',[baseFilter,picture,pictureFilter].filter(Boolean).join(' ')||'none');set(v,'box-shadow','none');set(v,'will-change','auto');return;
     }
     const box=targetBox(v), elementWidth=Math.max(1,v.offsetWidth),elementHeight=Math.max(1,v.offsetHeight);
     // In fill mode, cover the rendered player box. This removes the outer bars
@@ -187,22 +281,24 @@
     const cover=settings.ratio==='auto'||settings.ratio==='cover' ? Math.max(box.width/(elementWidth*remainingWidth),box.height/(elementHeight*remainingHeight)) : 1;
     const wheelScale=settings.playerWheelZoom?clamp(settings.wheelScale,1,2.5):1,zoom=clamp(settings.zoom*wheelScale,1,2.5), sx=clamp(settings.stretch,1,2);
     const tx=clamp(settings.panX,-50,50),ty=clamp(settings.panY,-50,50);
-    const sharpFilter='';
-    // Picture processing is opt-in in both framing modes.
-    const filters=settings.autoPicture?`${sharpFilter}brightness(${clamp(settings.brightness,0,200)}%) contrast(${clamp(settings.contrast-clamp(settings.shadowLift,0,30),0,200)}%) saturate(${clamp(settings.saturation,0,250)+clamp(settings.vibrance,0,100)}%)`:'';
     const baseTransform=state?.baseTransform&&state.baseTransform!=='none'?`${state.baseTransform} `:'';
     const aspectFrame=aspectFrameGeometry({width:elementWidth,height:elementHeight,videoWidth:v.videoWidth,videoHeight:v.videoHeight,targetWidth:box.width,targetHeight:box.height,cropAspect:settings.cropAspect,customAspect:settings.customAspect,trim:settings.frameTrim,layout:settings.ratio,zoom,stretch:settings.stretch});
-    set(v,'transition','none');
+    const edgeFit=aspectFrame||settings.ratio==='contain'?'contain':'cover';
+    const pictureFilter=staticPictureFilter(v,settings.autoPicture?settings.shadowLift:0,settings.autoPicture?settings.sharpen:0,settings.autoPicture?settings.vibrance:0,settings.autoPicture?settings.hdr:0,settings.edgeStretch,edgeFit,box.width,aspectFrame?.scaleX??cover*zoom*sx);
+    // Color processing remains opt-in; edge geometry is an independent framing control.
+    const filters=settings.autoPicture?[`brightness(${clamp(settings.brightness,0,200)}%)`,`contrast(${clamp(settings.contrast,0,200)}%)`,`saturate(${clamp(settings.saturation,0,250)}%)`].join(' '):'';
+    const smooth=performance.now()<smoothPresentationUntil&&!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    set(v,'transition',smooth?'transform 240ms cubic-bezier(.2,.75,.25,1)':'none');
     if(aspectFrame){
       set(v,'object-fit','contain');set(v,'object-position','50% 50%');set(v,'transform-origin','center center');
       set(v,'transform',`${baseTransform}scale(${aspectFrame.scaleX},${aspectFrame.scaleY}) translate(${tx}%,${ty}%)`);
       set(v,'clip-path',`inset(${aspectFrame.top}% ${aspectFrame.left}% ${aspectFrame.top}% ${aspectFrame.left}%)`);
-      set(v,'filter',[state.baseFilter&&state.baseFilter!=='none'?state.baseFilter:'',filters].filter(Boolean).join(' ')||'none');
+      set(v,'filter',[state.baseFilter&&state.baseFilter!=='none'?state.baseFilter:'',filters,pictureFilter].filter(Boolean).join(' ')||'none');
       set(v,'will-change','auto');renderGlow(v);return;
     }
     set(v,'object-position',state.baseObjectPosition||'50% 50%');
     set(v,'transform',`${baseTransform}scale(${cover*zoom*sx},${cover*zoom}) translate(${tx}%,${ty}%)`);
-    set(v,'transform-origin',state?.baseTransformOrigin||'center center');set(v,'filter',[state?.baseFilter&&state.baseFilter!=='none'?state.baseFilter:'',filters].filter(Boolean).join(' ')||'none');set(v,'will-change','transform');
+    set(v,'transform-origin',state?.baseTransformOrigin||'center center');set(v,'filter',[state?.baseFilter&&state.baseFilter!=='none'?state.baseFilter:'',filters,pictureFilter].filter(Boolean).join(' ')||'none');set(v,'will-change','transform');
     renderGlow(v);
     if(settings.ratio==='contain')set(v,'object-fit','contain');
     else if(settings.ratio==='fill')set(v,'object-fit','fill');
@@ -247,14 +343,26 @@
     }
   }
   function scheduleLayout(){if(layoutFrame)return;layoutFrame=requestAnimationFrame(()=>{layoutFrame=0;safeRun(()=>{apply();injectPlayerPanels();for(const host of playerPanels)host.__uwfPositionPanel?.();});});}
-  let fullscreenSettleTimer=0,presentationDeadline=0,presentationRetries=0,presentationSignature='';
-  function beginPresentationChange(){presentationDeadline=performance.now()+3000;presentationRetries=2;scheduleFullscreenLayout();}
+  let fullscreenSettleTimer=0,presentationDeadline=0,presentationRetries=0,presentationSignature='',smoothPresentationUntil=0;
+  function beginPresentationChange(){if(holdsFocusFrame())return;presentationDeadline=performance.now()+3000;smoothPresentationUntil=performance.now()+900;presentationRetries=2;scheduleFullscreenLayout();}
   const presentationStyleObserver=new MutationObserver(()=>safeRun(()=>{
     const video=resizeObservedVideo,state=video&&managed.get(video);
+    if(state&&holdsFocusFrame()&&settings.enabled&&comparisonVideo!==video){
+      const changed=Object.entries(state.expected).filter(([property,expected])=>!sameInline(video,property,expected));
+      if(changed.length&&focusRepairs<8){focusRepairs++;for(const [property,expected] of changed){state.props[property]={value:video.style.getPropertyValue(property),priority:video.style.getPropertyPriority(property)};video.style.setProperty(property,expected.value,expected.priority);}state.styleConflict=null;}
+      return;
+    }
     // Only retry author changes during a bounded presentation transition.
     // Our own writes match expected values and must never trigger a retry loop.
     if(!state||performance.now()>presentationDeadline||presentationRetries<=0)return;
     if(Object.entries(state.expected).some(([property,expected])=>!sameInline(video,property,expected)))scheduleFullscreenLayout();
+  }));
+  const presentationModeObserver=new MutationObserver(records=>safeRun(()=>{
+    // Several players switch fullscreen/theater by toggling an ancestor class
+    // without firing fullscreenchange. Catch that mode transition as well.
+    const modeTokens=value=>String(value||'').split(/\s+/).filter(token=>/(?:full.?screen|theat(?:er|re)|cinema)/i.test(token)).sort().join(' ');
+    const changed=records.some(record=>modeTokens(record.oldValue)!==modeTokens(record.target.className?.baseVal??record.target.className));
+    if(changed)beginPresentationChange();
   }));
   function scheduleFullscreenLayout(){
     if(fullscreenSettleTimer)clearTimeout(fullscreenSettleTimer);
@@ -266,15 +374,10 @@
       fullscreenSettleTimer=0;
       requestAnimationFrame(()=>safeRun(()=>{
         const video=activeVideo(),previous=video&&managed.get(video);
-        if(previous&&settings.enabled&&comparisonVideo!==video&&presentationRetries>0){
+        const authorReset=previous&&Object.entries(previous.expected).some(([property,expected])=>!sameInline(video,property,expected));
+        if(previous&&authorReset&&settings.enabled&&comparisonVideo!==video&&presentationRetries>0&&performance.now()<=presentationDeadline){
           presentationRetries--;
-          // Players may replace inline styles when changing presentation mode.
-          // Rebase once per fullscreen event, preserving the locked content crop.
-          // Restore and render in the same frame; never restart this on a poll.
-          const crop={};
-          for(const key of ['detectedBars','barLocked','barCandidate','barCount','barCandidateSince','lastBarSample','clipFailed'])crop[key]=previous[key];
-          restore(video);
-          Object.assign(remember(video),crop);
+          rebasePresentationStyles(video,previous);
         }
         apply();injectPlayerPanels();
         for(const host of playerPanels)host.__uwfPositionPanel?.();
@@ -282,17 +385,17 @@
     },350);
   }
   function observeVideoLayout(video){
-    if(video){
+    if(video&&!document.hidden&&!holdsFocusFrame()&&visible(video)){
       const box=targetBox(video),signature=[video.offsetWidth,video.offsetHeight,Math.round(box.width),Math.round(box.height)].join(':');
       if(video===resizeObservedVideo&&presentationSignature&&signature!==presentationSignature)beginPresentationChange();
       presentationSignature=signature;
-    }else presentationSignature='';
+    }else if(!video)presentationSignature='';
     if(video===resizeObservedVideo)return;
-    presentationStyleObserver.disconnect();
+    presentationStyleObserver.disconnect();presentationModeObserver.disconnect();
     if(video)presentationStyleObserver.observe(video,{attributes:true,attributeFilter:['style']});
     layoutObserver?.disconnect();resizeObservedVideo=video||null;
     let node=video,depth=0;
-    while(node&&depth++<13){try{layoutObserver?.observe(node);}catch{}node=node.parentElement||node.getRootNode?.().host||null;}
+    while(node&&depth++<13){try{layoutObserver?.observe(node);presentationModeObserver.observe(node,{attributes:true,attributeFilter:['class'],attributeOldValue:true});}catch{}node=node.parentElement||node.getRootNode?.().host||null;}
   }
   const videoIdentities=new WeakMap();let reportedVideoToken;
   function videoTokenFor(video){
@@ -302,7 +405,7 @@
     if(!identity||identity.signature!==signature){identity={signature,token:globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random()}`};videoIdentities.set(video,identity);}
     return identity.token;
   }
-  function apply(){if(applying)return;applying=true;try{if(isYouTubeShorts()){for(const v of [...managed.keys()])restore(v);selectedVideo=null;return;}const current=activeVideo();if(comparisonVideo&&comparisonVideo!==current)comparisonVideo=null;observeVideoLayout(current);const token=videoTokenFor(current);if(token!==reportedVideoToken){reportedVideoToken=token;chrome.runtime.sendMessage({type:'uwf-media-updated'}).catch(()=>{});}if(settingsScope==='video'&&token!==appliedVideoToken){appliedVideoToken=token;settings={...settingsBaseline};loadSettings();}for(const v of [...managed.keys()])if(!v.isConnected||!settings.enabled||v!==current)restore(v);if(settings.enabled&&current){if(comparisonVideo===current)restore(current);else{render(current);if(sampleBars(current))render(current);}}}finally{applying=false;}}
+  function apply(){if(applying)return;applying=true;try{if(isYouTubeShorts()){for(const v of [...managed.keys()])restore(v);selectedVideo=null;return;}const current=activeVideo();if(comparisonVideo&&comparisonVideo!==current)comparisonVideo=null;observeVideoLayout(current);const token=videoTokenFor(current);if(token!==reportedVideoToken){reportedVideoToken=token;chrome.runtime.sendMessage({type:'uwf-media-updated'}).catch(()=>{});}if(settingsScope==='video'&&token!==appliedVideoToken){appliedVideoToken=token;settings={...settingsBaseline};loadSettings();}for(const v of [...managed.keys()])if(!v.isConnected||!settings.enabled||v!==current)restore(v);if(settings.enabled&&current&&!document.hidden&&!holdsFocusFrame()&&visible(current)){if(comparisonVideo===current)restore(current);else{render(current);if(sampleBars(current))render(current);}}}finally{applying=false;}}
   // Audio-reactive effects are disabled, including previously saved settings.
   let settingsLoad=0,saveQueue=Promise.resolve(),settingsScope='global',settingsScopeInfo=null,appliedVideoToken=null,settingsBaseline={...defaults},keyboardShortcutConfig={enabled:false,bindings:{}};
   const shortcutActionNames=['toggleFit','resetFraming','zoomIn','zoomOut','toggleBars','togglePicture','cycleAspect','toggleTheater'];
@@ -320,7 +423,7 @@
     if(!settings.enabled||!siteAllowed)return;
     if(action==='toggleTheater'){if(!/(^|\.)youtube\.com$/i.test(location.hostname))return;const button=document.querySelector('.ytp-size-button');if(button instanceof HTMLButtonElement&&!button.disabled&&button.getClientRects().length)button.click();return;}
     if(action==='toggleFit'){saveFraming({ratio:settings.ratio==='contain'?'auto':'contain'});return;}
-    if(action==='resetFraming'){saveFraming({zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,stretch:1,ratio:'auto',cropAspect:'source',customAspect:2.39,autoBars:false,frameTrim:0});return;}
+    if(action==='resetFraming'){saveFraming({zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,stretch:1,edgeStretch:0,ratio:'auto',cropAspect:'source',customAspect:2.39,autoBars:false,frameTrim:0});return;}
     if(action==='zoomIn'||action==='zoomOut'){
       const key=settings.mode==='manual'?'zoom':'shortcutScale',current=clamp(settings[key],1,2.5),next=clamp(Math.round((current+(action==='zoomIn'?.1:-.1))*100)/100,1,2.5);if(next!==current)saveFraming({[key]:next});return;
     }
@@ -341,6 +444,8 @@
     })).catch(error=>safeRun(()=>{throw error;}));
   }
   function saveFraming(changes){
+    // An explicit panel edit takes precedence over the passive focus hold.
+    focusHold=false;focusReturnUntil=0;smoothPresentationUntil=0;
     saveQueue=saveQueue.then(async()=>{
       const response=await chrome.runtime.sendMessage({type:'uwf-settings-write',changes,videoToken:videoTokenFor(activeVideo())});
       if(!response?.ok)throw new Error(response?.error||'Ayarlar kaydedilemedi.');
@@ -362,7 +467,7 @@
     }).catch(error=>safeRun(()=>{throw error;}));
   }
   const scopeOptionsMarkup='<option value="inherit">Varsayılan kapsam</option><option value="global">Genel · tüm cihazlar</option><option value="device">Bu cihaz</option><option value="site">Bu site</option><option value="tab">Yalnızca bu sekme</option><option value="video">Yalnızca bu video</option><option value="supported">İzinli siteler</option>';
-  const panelFields=['enabled','mode','autoBars','autoPicture','zoom','panX','panY','stretch','ratio','cropAspect','customAspect','frameTrim','brightness','contrast','shadowLift','saturation','vibrance'];
+  const panelFields=['enabled','mode','edgeStretch','autoBars','autoPicture','zoom','panX','panY','stretch','ratio','cropAspect','customAspect','frameTrim','brightness','contrast','hdr','shadowLift','saturation','vibrance','sharpen'];
   function syncPlayerPanels(){
     for(const host of playerPanels){
       const shadow=host.shadowRoot;if(!shadow)continue;
@@ -374,11 +479,11 @@
         const output=shadow.getElementById(`${id}Out`);if(output)output.value=`${['zoom','stretch'].includes(id)?Math.round(Number(value)*100):Number(value)}%`;
       }
       shadow.getElementById('manualControls').disabled=settings.mode!=='manual';
-      shadow.getElementById('manualControls').hidden=settings.mode!=='manual';
+      shadow.getElementById('manualControls').hidden=false;
       shadow.getElementById('customAspectField').hidden=settings.cropAspect!=='custom';
       shadow.getElementById('enabled').disabled=!siteAllowed;
       shadow.getElementById('pictureControls').disabled=!settings.autoPicture;
-      shadow.getElementById('pictureControls').hidden=!settings.autoPicture;
+      shadow.getElementById('pictureControls').hidden=false;
       for(const category of ['framing','bars','picture']){
         const select=shadow.getElementById(`${category}Scope`);if(!select)continue;
         select.value=settingsScopeInfo?.categoryIndependent?.[category]?settingsScopeInfo.categoryScopes[category]:'inherit';
@@ -413,6 +518,7 @@
       `İşleme: ${!settings.enabled?'Kapalı':state?.styleConflict||state?.animationConflict?'Stil/animasyon çakışması nedeniyle bekliyor':state?.framingBlocked?'Boyut sınırı nedeniyle durduruldu':state?'Uygulanıyor':'Bekleniyor'}`,
       `Fare tekeri: ${settings.playerWheelZoom?`${Math.round(settings.wheelScale*100)}%`:'Kapalı'}`,
       `Renk: ${settings.autoPicture?'Açık':'Kapalı'}`,
+      `Kenar esnetme: ${settings.edgeStretch?`${settings.edgeStretch}% ayarlı`:'Kapalı'}`,
       `İç bant algılama: ${!settings.autoBars?'Kapalı':state?.clipFailed?'Kare okunamadı':state?.barLocked?'Sabit kadraj uygulandı':'Ölçülüyor'}`,
       `Korumalı medya anahtarı: ${video.mediaKeys?'Var':'Algılanmadı'}`,
       `Yakalanan çalışma hatası: ${reportedRuntimeErrors.size}`,
@@ -426,37 +532,45 @@
     host.__uwfVideo=video||activeVideo();if(floating){host.dataset.uwfFloating='true';host.style.position='fixed';positionFloatingPanel(host);const fullscreen=document.fullscreenElement;(fullscreen&&fullscreen!==host.__uwfVideo&&composedContains(fullscreen,host.__uwfVideo)?fullscreen:document.body||document.documentElement).append(host);}
     const shadow=host.attachShadow({mode:'open'});
     shadow.innerHTML=`<style>
-:host{--surface:#192124;--field:#202c30;--text:#edf5f3;--muted:#b1c1c1;--line:#53686b;--accent:#9be3cb;display:inline-flex;position:relative;vertical-align:middle;z-index:2147483647;font:13px/1.5 system-ui,sans-serif;color:var(--text);color-scheme:dark}
-:host([data-theme=light]){--surface:#fff;--field:#eef3ef;--text:#182c28;--muted:#4e625b;--line:#758a80;--accent:#1b6e51;color-scheme:light}
-:host([data-theme=ocean]){--surface:#142b3b;--field:#203e50;--text:#edf6ff;--muted:#b3cad9;--line:#597e93;--accent:#9ddbf6}
-:host([data-theme=glass]){--surface:#1a2034;--field:#222b45;--text:#f2f4ff;--muted:#c1c9df;--line:#6f7b9f;--accent:#c3caff}
-:host([data-theme=glass]) .panel{background:linear-gradient(145deg,#202844,#171d30 72%,#211d35);border-color:#687495;box-shadow:inset 0 1px #ffffff26,0 12px 32px #080b1790,-1px 0 #aa9bff35,1px 0 #78d6ff35}
-:host([data-theme=glass]) .trigger{color:#c3caff}
-*{box-sizing:border-box}[hidden]{display:none!important}button,input,select{font:inherit}button{cursor:pointer}button,select{color:var(--text);background:var(--field);border:1px solid var(--line);border-radius:8px;min-height:36px;padding:6px 10px}
-.trigger{all:initial;box-sizing:border-box;display:grid;place-items:center;width:36px;height:36px;border:0;border-radius:6px;color:#9be3cb;background:transparent;cursor:pointer}.trigger svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round}
-:focus-visible{outline:3px solid var(--accent);outline-offset:2px}.trigger:focus-visible{outline:2px solid #9be3cb;outline-offset:-2px}.trigger:hover{background:#ffffff26}
-.panel{display:none;position:fixed;inset:auto;margin:0;width:min(320px,calc(100vw - 16px));max-height:calc(100vh - 24px);overflow:auto;overscroll-behavior:contain;padding:18px;background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 32px #0006}
-.panel[open]{display:block}.panel:popover-open{display:block}
-.top{position:sticky;top:-18px;z-index:1;background:var(--surface);padding-block:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.top h2{font:650 16px/1.3 system-ui;margin:0}.drag-handle{cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none}.drag-handle.dragging{cursor:grabbing}.position-actions{display:flex;flex-wrap:wrap;gap:6px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.close{font-size:20px;min-width:36px}.field{display:grid;grid-template-columns:1fr auto;gap:6px;margin:14px 0}.field input[type=range],.field select{grid-column:1/-1;width:100%}input[type=range]{accent-color:var(--accent);min-height:24px;margin:0}output{color:var(--accent);font-variant-numeric:tabular-nums}.toggle{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:42px}.toggle input{width:22px;height:22px;flex-shrink:0;accent-color:var(--accent)}fieldset{border:0;padding:0;margin:16px 0;min-width:0}legend,.hint{font-size:12px;color:var(--muted)}input:disabled,select:disabled{opacity:.5}.reset,.scope-clear,#compareOriginal,#fullFramePreset{width:100%}.scope-clear{min-height:30px;font-size:11px}.scope-clear:disabled{opacity:.5;cursor:not-allowed}#fullFramePreset{border-color:var(--accent);color:var(--accent)}#fullFramePreset:disabled{opacity:.5;cursor:not-allowed}.hint{margin:12px 0 0}details{border-top:1px solid var(--line);padding-top:12px;margin-top:18px}summary{cursor:pointer;padding-block:6px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 system-ui;color:var(--muted)}.diagnose{width:100%}
-@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
-:host{--surface:#171b26;--field:#222838;--text:#f0f2fa;--muted:#a9b2c9;--line:#394258;--accent:#b7afff}
-.panel{width:min(340px,calc(100vw - 16px));padding:16px;border-radius:18px;box-shadow:0 20px 60px #0008;border-color:var(--line)}
-.top{position:static;padding:0 0 12px;margin:0;border-bottom:1px solid var(--line);gap:8px}.top h2{margin-right:auto;font-size:17px;letter-spacing:-.4px}.top h2 small{font-size:9px;letter-spacing:1px;color:var(--accent)}
-.top button{min-height:30px;padding:4px 8px;font-size:12px}.close{font-size:18px!important}.field{margin:10px 0;gap:4px}.toggle{font-size:12px;min-height:40px}.toggle input{width:18px;height:18px}button,select{border-radius:9px;font-size:12px}select{max-width:100%}fieldset{margin:12px 0}.hint{line-height:1.5;font-size:11px;margin:8px 0}.ui-pane>button{margin-top:6px}details{margin-top:10px;padding-top:6px}summary{font-size:12px;color:var(--muted)}.manual-detail{border:1px solid var(--line);padding:8px 10px;border-radius:10px}.trigger{color:#c5bfff}.panel>details{border-top:1px solid var(--line)}
+:host{--surface:#101a26;--surface-2:#172638;--field:#0c1621;--text:#f4f7fb;--muted:#a4b3c2;--line:#304455;--accent:#9de8d0;--accent-strong:#67d4b2;--accent-ink:#07261d;display:inline-flex;position:relative;vertical-align:middle;z-index:2147483647;font:13px/1.5 Inter,"Segoe UI",system-ui,sans-serif;color:var(--text);color-scheme:dark}
+:host([data-theme=light]){--surface:#fff;--surface-2:#f4f8f6;--field:#edf3f0;--text:#14231f;--muted:#53665f;--line:#cad8d2;--accent:#146c52;--accent-strong:#0b7958;--accent-ink:#fff;color-scheme:light}
+:host([data-theme=ocean]){--surface:#0e2130;--surface-2:#142b3d;--field:#091a27;--text:#eff8ff;--muted:#abc4d4;--line:#29485c;--accent:#9bdafa;--accent-strong:#71c8ee;--accent-ink:#0a2532}
+:host([data-theme=glass]){--surface:#171d30;--surface-2:#202943;--field:#121a2d;--text:#f3f4ff;--muted:#bac5df;--line:#465576;--accent:#c3caff;--accent-strong:#b3a5ff;--accent-ink:#171a2c}
+:host([data-theme=glass]) .panel{background:linear-gradient(145deg,#202844,#171d30 72%,#211d35);border-color:#687495;box-shadow:inset 0 1px #ffffff26,0 18px 48px #080b1790,-1px 0 #aa9bff35,1px 0 #78d6ff35}
+*{box-sizing:border-box}[hidden]{display:none!important}button,input,select{font:inherit}button{cursor:pointer}
+button,select{min-width:0;min-height:38px;padding:8px 11px;border:1px solid var(--line);border-radius:10px;background:var(--field);color:var(--text);font-size:12px;font-weight:650}
+button:hover:not(:disabled),select:hover{border-color:var(--accent);background:var(--surface-2)}button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
+:where(button,input,select):focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.trigger{all:initial;box-sizing:border-box;display:grid;place-items:center;width:36px;height:36px;border:1px solid transparent;border-radius:9px;color:var(--accent);background:#09121dbb;cursor:pointer;vertical-align:middle}
+.trigger svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.trigger:hover{background:var(--surface-2);border-color:var(--line)}.trigger:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.panel{display:none;position:fixed;inset:auto;margin:0;width:min(340px,calc(100vw - 20px));max-height:calc(100dvh - 20px);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--line) transparent;padding:14px;background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:18px;box-shadow:0 22px 64px #0009}
+.panel[open],.panel:popover-open{display:block}
+.top{position:sticky;inset-block-start:-14px;z-index:2;display:flex;align-items:center;gap:7px;margin:-14px -14px 10px;padding:12px 14px;background:var(--surface);border-block-end:1px solid var(--line)}
+.top h2{margin:0 auto 0 0;font-size:16px;line-height:1.2;font-weight:760;letter-spacing:-.025em}.top h2 small{margin-inline-start:5px;color:var(--accent);font-size:9px;letter-spacing:.12em}
+.top button{min-height:34px;padding:6px 9px;font-size:11px}.drag-handle{cursor:grab;touch-action:none;user-select:none}.drag-handle.dragging{cursor:grabbing}.close{min-width:34px;padding:4px!important;font-size:18px!important}
+.position-actions{display:flex;flex-wrap:wrap;gap:6px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.field{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px;margin:11px 0;font-size:12px;font-weight:610}.field input[type=range],.field select{grid-column:1/-1;width:100%}
+input[type=range]{accent-color:var(--accent-strong);min-height:26px;margin:0}output{color:var(--accent);font-variant-numeric:tabular-nums;font-size:11px;font-weight:720}
+.toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;margin:7px 0;padding:9px 10px;border:1px solid var(--line);border-radius:11px;background:var(--surface-2);font-size:12px;font-weight:600}.toggle input{appearance:none;position:relative;flex:0 0 40px;width:40px;height:23px;border:1px solid var(--line);border-radius:999px;background:#263748;accent-color:var(--accent);cursor:pointer}.toggle input::before{content:"";position:absolute;inset:2px auto auto 2px;width:17px;height:17px;border-radius:50%;background:#dce5ec;transition:transform .14s ease}.toggle input:checked{background:var(--accent-strong);border-color:var(--accent-strong)}.toggle input:checked::before{transform:translateX(17px);background:var(--accent-ink)}
+fieldset:disabled{opacity:.55}fieldset{min-width:0;margin:13px 0;padding:12px;border:1px solid var(--line);border-radius:13px;background:var(--field)}legend{padding:0 6px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.03em}
+.hint{margin:8px 1px 11px;color:var(--muted);font-size:11px;line-height:1.55}.reset,.scope-clear,#compareOriginal,#fullFramePreset{width:100%;margin-block:5px}.scope-clear{min-height:32px;padding:6px 9px;font-size:11px}.scope-clear:disabled{opacity:.5;cursor:not-allowed}#fullFramePreset{border-color:var(--accent);color:var(--accent)}#fullFramePreset:disabled{opacity:.5;cursor:not-allowed}
 
-.ui-tabs{position:relative;min-width:0}.ui-tab-input{position:absolute!important;width:1px!important;height:1px!important;clip-path:inset(50%);overflow:hidden}
-.ui-tab-labels{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:4px;background:var(--field);border-radius:12px;margin:12px 0}
-.ui-tab-labels label{display:block;text-align:center;margin:0;padding:9px 4px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:650;color:var(--muted)}
-.ui-pane{display:none}.ui-tab-pages{max-height:min(410px,calc(100dvh - 240px));overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--line) transparent;padding:0 3px 2px 0}
-#ui-tab-0:checked ~ .ui-tab-pages .ui-pane-0{display:block}#ui-tab-0:checked ~ .ui-tab-labels label[for="ui-tab-0"]{background:var(--surface);color:var(--accent);box-shadow:0 1px 4px #0002}#ui-tab-0:focus-visible ~ .ui-tab-labels label[for="ui-tab-0"]{outline:2px solid var(--accent);outline-offset:-2px}#ui-tab-1:checked ~ .ui-tab-pages .ui-pane-1{display:block}#ui-tab-1:checked ~ .ui-tab-labels label[for="ui-tab-1"]{background:var(--surface);color:var(--accent);box-shadow:0 1px 4px #0002}#ui-tab-1:focus-visible ~ .ui-tab-labels label[for="ui-tab-1"]{outline:2px solid var(--accent);outline-offset:-2px}#ui-tab-2:checked ~ .ui-tab-pages .ui-pane-2{display:block}#ui-tab-2:checked ~ .ui-tab-labels label[for="ui-tab-2"]{background:var(--surface);color:var(--accent);box-shadow:0 1px 4px #0002}#ui-tab-2:focus-visible ~ .ui-tab-labels label[for="ui-tab-2"]{outline:2px solid var(--accent);outline-offset:-2px}
-.ui-tabs .ui-tab-pages .ui-pane-1{display:contents}
-.ui-pane-1 > *{display:none}
-#ui-tab-1:checked ~ .ui-tab-pages .ui-pane-1 > label[for=autoPicture]{display:flex}
-#ui-tab-1:checked ~ .ui-tab-pages .ui-pane-1 > #pictureControls{display:block}
-#ui-tab-0:checked ~ .ui-tab-pages .ui-pane-1 > label[for=autoBars]{display:flex}
-#ui-tab-2:checked ~ .ui-tab-pages .ui-pane-1 > label[for=barsScope]{display:grid}
-#ui-tab-2:checked ~ .ui-tab-pages .ui-pane-1 > #barsScopeClear{display:block}
-</style><button class="trigger" type="button" aria-label="Uwide video ayarları" aria-expanded="false" aria-controls="uwidePanel" title="Uwide video ayarları"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"></path></svg></button><section id="uwidePanel" class="panel" role="region" aria-labelledby="panelTitle"><div class="top"><h2 id="panelTitle">Uwide <small>FREE</small></h2><button class="drag-handle" type="button" hidden aria-label="Paneli taşı. Ok tuşlarıyla hareket ettirin; konum seçenekleri için tıklayın." aria-controls="panelPosition" aria-expanded="false">Taşı</button><button class="close" type="button" aria-label="Ayarları kapat">×</button></div><details id="panelPosition"><summary>Panel konumu ve klavye yardımı</summary><p class="hint">Taşı düğmesini sürükleyin veya odaktayken ok tuşlarını kullanın. Shift ile daha küçük adımlar atabilirsiniz. Aşağıdaki düğmeler sürüklemeden taşır. Konum bu sitede saklanır; ekran değişince görünür alana sığdırılır.</p><div class="position-actions"><button type="button" data-move="left">Sola</button><button type="button" data-move="right">Sağa</button><button type="button" data-move="up">Yukarı</button><button type="button" data-move="down">Aşağı</button><button type="button" class="position-reset">Konumu sıfırla</button></div></details><span class="sr-only position-status" role="status"></span><p class="hint compat-status" role="status" hidden></p><label class="toggle" for="enabled"><span>Eklentiyi etkinleştir</span><input id="enabled" type="checkbox"></label><div class="ui-tabs"><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-0" aria-label="Kadraj" aria-controls="ui-pane-0" checked><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-1" aria-label="Görüntü" aria-controls="ui-pane-1" ><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-2" aria-label="Kapsam" aria-controls="ui-pane-2" ><div class="ui-tab-labels"><label for="ui-tab-0">Kadraj</label><label for="ui-tab-1">Görüntü</label><label for="ui-tab-2">Kapsam</label></div><div class="ui-tab-pages"><div class="ui-pane ui-pane-0" id="ui-pane-0" role="region" aria-label="Kadraj"><label class="field" for="mode">Boyutlandırma<select id="mode"><option value="automatic">Otomatik</option><option value="manual">Manuel</option></select></label><label class="field" for="ratio">Yerleşim<select id="ratio"><option value="auto">Alanı kapla · kenarlar kırpılabilir</option><option value="contain">Videonun tamamını sığdır</option><option value="fill">Esnet · yalnızca manuel</option></select></label><details class="manual-detail"><summary>Manuel kadraj araçları</summary><fieldset id="manualControls"><legend>Manuel kadraj</legend><label class="field" for="zoom">Yakınlaştırma<output id="zoomOut" for="zoom"></output><input id="zoom" type="range" min="1" max="2.5" step="0.01"></label><label class="field" for="panX">Yatay konum<output id="panXOut" for="panX"></output><input id="panX" type="range" min="-50" max="50" step="1"></label><label class="field" for="panY">Dikey konum<output id="panYOut" for="panY"></output><input id="panY" type="range" min="-50" max="50" step="1"></label><label class="field" for="stretch">Yatay esnetme<output id="stretchOut" for="stretch"></output><input id="stretch" type="range" min="1" max="1.6" step="0.01"></label><label class="field" for="frameTrim">Üst ve alt kırpma<output id="frameTrimOut" for="frameTrim"></output><input id="frameTrim" type="range" min="0" max="25" step="0.5"></label><label class="field" for="cropAspect">Kırpma oranı (manuel)<select id="cropAspect"><option value="source">Kaynak oranı · ek kırpma yok</option><option value="16:9">16:9</option><option value="16:10">16:10</option><option value="18:9">18:9</option><option value="21:9">21:9</option><option value="32:9">32:9</option><option value="4:3">4:3</option><option value="1:1">1:1 · kare</option><option value="custom">Özel oran</option></select></label><label id="customAspectField" for="customAspect" hidden>Özel oran · genişlik / yükseklik<input id="customAspect" type="number" min="0.5" max="4" step="0.01" inputmode="decimal" value="2.39"></label></fieldset></details><button id="fullFramePreset" type="button">Tam kare · filtre kapalı</button><button class="reset" type="button">Kadrajı sıfırla</button><button id="compareOriginal" type="button" aria-pressed="false">Özgün görünümü karşılaştır</button><details><summary>Kadraj hakkında</summary><p class="hint">Kaynak videonun içindeki hızlı ışık değişimlerini algılamaz; epilepsi güvenliği garantisi değildir.</p><p class="hint">Bu düğme yalnızca siz bastığınızda özgün görünüm ile Uwide kadrajı arasında geçiş yapar; ayarlarınızı değiştirmez.</p><p class="hint">Otomatik yerleşimde Alanı kapla kenarları kırpabilir; Videonun tamamını sığdır tüm kareyi gösterir ve boşluk bırakabilir. Değişiklikler seçili kayıt kapsamına kaydedilir.</p></details></div><div class="ui-pane ui-pane-1" id="ui-pane-1" role="region" aria-label="Görüntü"><label class="toggle" for="autoPicture"><span>Renk ve parlaklık işlemini uygula (isteğe bağlı)</span><input id="autoPicture" type="checkbox"></label><fieldset id="pictureControls"><legend>Sabit renk ayarları</legend><label class="field" for="brightness">Parlaklık<output id="brightnessOut" for="brightness"></output><input id="brightness" type="range" min="50" max="150" step="1"></label><label class="field" for="contrast">Kontrast<output id="contrastOut" for="contrast"></output><input id="contrast" type="range" min="50" max="150" step="1"></label><label class="field" for="shadowLift">Gölge açma · yaklaşık<output id="shadowLiftOut" for="shadowLift"></output><input id="shadowLift" type="range" min="0" max="30" step="1"></label><p class="hint">Kontrastı düşürerek koyu tonları açar; tüm tonları etkiler, seçici gölge işleme değildir.</p><label class="field" for="saturation">Doygunluk<output id="saturationOut" for="saturation"></output><input id="saturation" type="range" min="0" max="200" step="1"></label><label class="field" for="vibrance">Ek doygunluk<output id="vibranceOut" for="vibrance"></output><input id="vibrance" type="range" min="0" max="100" step="1"></label><p class="hint">Ek doygunluk seçici canlılık değildir; renkleri genel olarak artırır. Kapalı renk anahtarı bu ayarı da kapatır.</p></fieldset></div><div class="ui-pane ui-pane-2" id="ui-pane-2" role="region" aria-label="Kapsam"><label class="field" for="framingScope">Kadraj kayıt kapsamı<select id="framingScope">${scopeOptionsMarkup}</select></label><button id="framingScopeClear" class="scope-clear" type="button">Kadraj kapsamını kaldır</button><label class="field" for="pictureScope">Görüntü kayıt kapsamı<select id="pictureScope">${scopeOptionsMarkup}</select></label><button id="pictureScopeClear" class="scope-clear" type="button">Görüntü kapsamını kaldır</button></div></div></div><details><summary>Oynatıcı tanılaması</summary><pre class="diagnostics"></pre><button class="diagnose" type="button">Tanılamayı yenile</button></details></section>`;
+.ui-tabs{position:relative;min-width:0}
+.ui-tab-input{position:absolute!important;inline-size:1px!important;block-size:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip-path:inset(50%);white-space:nowrap!important;border:0!important}
+.ui-tab-labels{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:4px;border:1px solid var(--line);border-radius:13px;background:var(--field);margin:12px 0}
+.ui-tab-labels label{display:grid;place-items:center;min-block-size:40px;margin:0;padding:8px 4px;border:1px solid transparent;border-radius:9px;color:var(--muted);cursor:pointer;text-align:center;font-size:12px;font-weight:700}
+.ui-pane{display:none;min-width:0}
+.ui-tab-pages{max-block-size:min(440px,calc(100dvh - 230px));overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--line) transparent;padding:0 3px 4px 0}
+#ui-tab-0:checked~.ui-tab-pages .ui-pane-0,#ui-tab-1:checked~.ui-tab-pages .ui-pane-1,#ui-tab-2:checked~.ui-tab-pages .ui-pane-2{display:block}
+#ui-tab-0:checked~.ui-tab-labels label[for="ui-tab-0"],#ui-tab-1:checked~.ui-tab-labels label[for="ui-tab-1"],#ui-tab-2:checked~.ui-tab-labels label[for="ui-tab-2"]{color:var(--accent);background:var(--surface);border-color:var(--line);box-shadow:inset 0 -2px var(--accent)}
+#ui-tab-0:focus-visible~.ui-tab-labels label[for="ui-tab-0"],#ui-tab-1:focus-visible~.ui-tab-labels label[for="ui-tab-1"],#ui-tab-2:focus-visible~.ui-tab-labels label[for="ui-tab-2"]{outline:2px solid var(--accent);outline-offset:2px}
+
+.ui-pane>button{margin-block-start:7px}.ui-tabs .ui-tab-pages .ui-pane-1{display:contents}.ui-pane-1>*{display:none}#ui-tab-1:checked~.ui-tab-pages .ui-pane-1>label[for=autoPicture]{display:flex}#ui-tab-1:checked~.ui-tab-pages .ui-pane-1>#pictureControls{display:block}#ui-tab-0:checked~.ui-tab-pages .ui-pane-1>label[for=autoBars]{display:flex}#ui-tab-2:checked~.ui-tab-pages .ui-pane-1>label[for=barsScope]{display:grid}#ui-tab-2:checked~.ui-tab-pages .ui-pane-1>#barsScopeClear{display:block}
+.manual-detail{padding:9px 11px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2)}details{margin-block-start:11px;padding-block-start:9px;border-block-start:1px solid var(--line)}summary{cursor:pointer;padding-block:5px;color:var(--muted);font-size:11px;font-weight:680}pre{max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.55 ui-monospace,Consolas,monospace;color:var(--muted)}.diagnose{width:100%}.compat-status{margin:8px 0;padding:9px 11px;border-inline-start:3px solid #e3ae58;border-radius:8px;background:var(--surface-2);font-size:11px;line-height:1.5}
+@media(max-height:560px){.panel{max-height:calc(100dvh - 12px)}.ui-tab-pages{max-height:calc(100dvh - 200px)}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+</style><button class="trigger" type="button" aria-label="Uwide video ayarları" aria-expanded="false" aria-controls="uwidePanel" title="Uwide video ayarları"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"></path></svg></button><section id="uwidePanel" class="panel" role="region" aria-labelledby="panelTitle"><div class="top"><h2 id="panelTitle">Uwide <small>FREE</small></h2><button class="drag-handle" type="button" hidden aria-label="Paneli taşı. Ok tuşlarıyla hareket ettirin; konum seçenekleri için tıklayın." aria-controls="panelPosition" aria-expanded="false">Taşı</button><button class="close" type="button" aria-label="Ayarları kapat">×</button></div><details id="panelPosition"><summary>Panel konumu ve klavye yardımı</summary><p class="hint">Taşı düğmesini sürükleyin veya odaktayken ok tuşlarını kullanın. Shift ile daha küçük adımlar atabilirsiniz. Aşağıdaki düğmeler sürüklemeden taşır. Konum bu sitede saklanır; ekran değişince görünür alana sığdırılır.</p><div class="position-actions"><button type="button" data-move="left">Sola</button><button type="button" data-move="right">Sağa</button><button type="button" data-move="up">Yukarı</button><button type="button" data-move="down">Aşağı</button><button type="button" class="position-reset">Konumu sıfırla</button></div></details><span class="sr-only position-status" role="status"></span><p class="hint compat-status" role="status" hidden></p><label class="toggle" for="enabled"><span>Eklentiyi etkinleştir</span><input id="enabled" type="checkbox"></label><div class="ui-tabs"><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-0" aria-label="Kadraj" aria-controls="ui-pane-0" checked><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-1" aria-label="Görüntü" aria-controls="ui-pane-1" ><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-2" aria-label="Kapsam" aria-controls="ui-pane-2" ><div class="ui-tab-labels"><label for="ui-tab-0">Kadraj</label><label for="ui-tab-1">Görüntü</label><label for="ui-tab-2">Kapsam</label></div><div class="ui-tab-pages"><div class="ui-pane ui-pane-0" id="ui-pane-0" role="region" aria-label="Kadraj"><label class="field" for="mode">Boyutlandırma<select id="mode"><option value="automatic">Otomatik</option><option value="manual">Manuel</option></select></label><label class="field" for="ratio">Yerleşim<select id="ratio"><option value="auto">Alanı kapla · kenarlar kırpılabilir</option><option value="contain">Videonun tamamını sığdır</option><option value="fill">Esnet · yalnızca manuel</option></select></label><label class="field" for="edgeStretch">Kenar ağırlıklı esnetme · yaklaşık<output id="edgeStretchOut" for="edgeStretch"></output><input id="edgeStretch" type="range" min="0" max="100" step="1"></label><p class="hint">Kenarları daha fazla, merkezi daha az genişletir. Sıfırda kapalıdır; yüksek değerler görüntüyü bozabilir ve performansı etkileyebilir.</p><details class="manual-detail"><summary>Manuel kadraj araçları</summary><p class="hint">Bu araçları kullanmak için Boyutlandırma seçeneğini Manuel yapın. Otomatik modda araçlar pasiftir.</p><fieldset id="manualControls"><legend>Manuel kadraj</legend><label class="field" for="zoom">Yakınlaştırma<output id="zoomOut" for="zoom"></output><input id="zoom" type="range" min="1" max="2.5" step="0.01"></label><label class="field" for="panX">Yatay konum<output id="panXOut" for="panX"></output><input id="panX" type="range" min="-50" max="50" step="1"></label><label class="field" for="panY">Dikey konum<output id="panYOut" for="panY"></output><input id="panY" type="range" min="-50" max="50" step="1"></label><label class="field" for="stretch">Yatay esnetme<output id="stretchOut" for="stretch"></output><input id="stretch" type="range" min="1" max="1.6" step="0.01"></label><label class="field" for="frameTrim">Üst ve alt kırpma<output id="frameTrimOut" for="frameTrim"></output><input id="frameTrim" type="range" min="0" max="25" step="0.5"></label><label class="field" for="cropAspect">Kırpma oranı (manuel)<select id="cropAspect"><option value="source">Kaynak oranı · ek kırpma yok</option><option value="16:9">16:9</option><option value="16:10">16:10</option><option value="18:9">18:9</option><option value="21:9">21:9</option><option value="32:9">32:9</option><option value="4:3">4:3</option><option value="1:1">1:1 · kare</option><option value="custom">Özel oran</option></select></label><label id="customAspectField" for="customAspect" hidden>Özel oran · genişlik / yükseklik<input id="customAspect" type="number" min="0.5" max="4" step="0.01" inputmode="decimal" value="2.39"></label></fieldset></details><button id="fullFramePreset" type="button">Tam kare · filtre kapalı</button><button class="reset" type="button">Kadrajı sıfırla</button><button id="compareOriginal" type="button" aria-pressed="false">Özgün görünümü karşılaştır</button><details><summary>Kadraj hakkında</summary><p class="hint">Kaynak videonun içindeki hızlı ışık değişimlerini algılamaz; epilepsi güvenliği garantisi değildir.</p><p class="hint">Bu düğme yalnızca siz bastığınızda özgün görünüm ile Uwide kadrajı arasında geçiş yapar; ayarlarınızı değiştirmez.</p><p class="hint">Otomatik yerleşimde Alanı kapla kenarları kırpabilir; Videonun tamamını sığdır tüm kareyi gösterir ve boşluk bırakabilir. Değişiklikler seçili kayıt kapsamına kaydedilir.</p></details></div><div class="ui-pane ui-pane-1" id="ui-pane-1" role="region" aria-label="Görüntü"><label class="toggle" for="autoPicture"><span>Renk ve parlaklık işlemini uygula (isteğe bağlı)</span><input id="autoPicture" type="checkbox"></label><fieldset id="pictureControls"><legend>Sabit renk ayarları</legend><p class="hint">Anahtarı açın, ardından parlaklık veya diğer değerleri değiştirin. Varsayılan değerler görüntüyü değiştirmez.</p><label class="field" for="brightness">Parlaklık<output id="brightnessOut" for="brightness"></output><input id="brightness" type="range" min="50" max="150" step="1"></label><label class="field" for="contrast">Kontrast<output id="contrastOut" for="contrast"></output><input id="contrast" type="range" min="50" max="150" step="1"></label><label class="field" for="hdr">Parlak alan vurgusu · SDR<output id="hdrOut" for="hdr"></output><input id="hdr" type="range" min="0" max="100" step="1"></label><p class="hint">Statik eğri SDR görüntüde parlak tonları güçlendirir; gerçek HDR çıkışı oluşturmaz. Yüksek değerler ton kayması, kırpma veya GPU yavaşlaması yapabilir.</p><label class="field" for="shadowLift">Sabit gölge kurtarma<output id="shadowLiftOut" for="shadowLift"></output><input id="shadowLift" type="range" min="0" max="30" step="1"></label><p class="hint">Sabit ton eğrisi koyu tonları daha çok açar; etki yaklaşık kalır ve farklı yayınlarda doğrulanmamıştır.</p><label class="field" for="saturation">Doygunluk<output id="saturationOut" for="saturation"></output><input id="saturation" type="range" min="0" max="200" step="1"></label><label class="field" for="vibrance">Seçici canlılık · yaklaşık<output id="vibranceOut" for="vibrance"></output><input id="vibrance" type="range" min="0" max="100" step="1"></label><label class="field" for="sharpen">Sabit keskinleştirme<output id="sharpenOut" for="sharpen"></output><input id="sharpen" type="range" min="0" max="100" step="1"></label><p class="hint">Varsayılan kapalı; yalnızca sabit SVG filtre uygular. Yüksek değerler halo veya yavaşlama yapabilir.</p><p class="hint">Sabit SVG kromatik eğrisi düşük/orta kromayı daha çok güçlendirmeye çalışır; ton kayması veya kırpma olabilir. Varsayılanı sıfırdır; renk işlemi kapalıyken uygulanmaz. Kapalı renk anahtarı bu ayarı da kapatır.</p></fieldset></div><div class="ui-pane ui-pane-2" id="ui-pane-2" role="region" aria-label="Kapsam"><label class="field" for="framingScope">Kadraj kayıt kapsamı<select id="framingScope">${scopeOptionsMarkup}</select></label><button id="framingScopeClear" class="scope-clear" type="button">Kadraj kapsamını kaldır</button><label class="field" for="pictureScope">Görüntü kayıt kapsamı<select id="pictureScope">${scopeOptionsMarkup}</select></label><button id="pictureScopeClear" class="scope-clear" type="button">Görüntü kapsamını kaldır</button></div></div></div><details><summary>Oynatıcı tanılaması</summary><pre class="diagnostics"></pre><button class="diagnose" type="button">Tanılamayı yenile</button></details></section>`;
 
     const barLabel=document.createElement('label'),barText=document.createElement('span'),barInput=document.createElement('input');
     barLabel.className='toggle';barLabel.htmlFor='autoBars';barText.textContent='Videonun içindeki siyah bantları algıla';barInput.id='autoBars';barInput.type='checkbox';
@@ -471,14 +585,14 @@
     const announcePosition=message=>{shadow.querySelector('.position-status').textContent=message;};
     const restoreSavedPanelPosition=()=>{
       if(!savedPanelPosition||customPosition)return;
-      const view=window.visualViewport,width=view?.width||innerWidth,height=view?.height||innerHeight,left=view?.offsetLeft||0,top=view?.offsetTop||0,rect=panel.getBoundingClientRect(),panelWidth=Math.min(320,width-16),panelHeight=Math.min(Math.max(rect.height,savedPanelPosition.height),height-16);
+      const view=window.visualViewport,width=view?.width||innerWidth,height=view?.height||innerHeight,left=view?.offsetLeft||0,top=view?.offsetTop||0,rect=panel.getBoundingClientRect(),panelWidth=Math.min(340,width-16),panelHeight=Math.min(Math.max(rect.height,savedPanelPosition.height),height-16);
       customPosition={left:left+8+savedPanelPosition.x*Math.max(0,width-panelWidth-16),top:top+8+savedPanelPosition.y*Math.max(0,height-panelHeight-16),height:panelHeight};savedPanelPosition=null;
     };
     const positionPanel=()=>{
       const r=trigger.getBoundingClientRect(),view=window.visualViewport;
       const width=view?.width||innerWidth,height=view?.height||innerHeight;
       const left=view?.offsetLeft||0,top=view?.offsetTop||0;
-      const panelWidth=Math.min(320,width-16);
+      const panelWidth=Math.min(340,width-16);
       if(!customPosition&&savedPanelPosition)restoreSavedPanelPosition();
       if(customPosition){
         panel.style.maxHeight=`${Math.min(customPosition.height,height-16)}px`;
@@ -543,8 +657,8 @@
     panel.addEventListener('click',event=>event.stopPropagation());
     for(const id of panelFields){const input=shadow.getElementById(id);input.addEventListener('change',()=>{const value=input.type==='checkbox'?input.checked:['range','number'].includes(input.type)?Number(input.value):input.value;saveFraming(id==='mode'&&value==='automatic'&&settings.ratio==='fill'?{mode:value,ratio:'auto'}:{[id]:value});});if(input.type==='range')input.addEventListener('input',()=>{const output=shadow.getElementById(`${id}Out`);if(output)output.value=`${['zoom','stretch'].includes(id)?Math.round(Number(input.value)*100):Number(input.value)}%`;});}
     for(const category of ['framing','bars','picture']){shadow.getElementById(`${category}Scope`).addEventListener('change',event=>saveCategoryScope(category,event.target.value));shadow.getElementById(`${category}ScopeClear`).addEventListener('click',()=>clearCategoryScope(category));}
-    shadow.getElementById('fullFramePreset').addEventListener('click',()=>saveFraming({mode:'automatic',autoPicture:false,zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,ratio:'contain',cropAspect:'source',customAspect:2.39,stretch:1,autoBars:false,frameTrim:0,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0,profile:'fullFrame'}));
-    shadow.querySelector('.reset').addEventListener('click',()=>saveFraming({zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,stretch:1,ratio:'auto',cropAspect:'source',customAspect:2.39,autoBars:false,frameTrim:0}));
+    shadow.getElementById('fullFramePreset').addEventListener('click',()=>saveFraming({mode:'automatic',autoPicture:false,zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,ratio:'contain',cropAspect:'source',customAspect:2.39,stretch:1,edgeStretch:0,autoBars:false,frameTrim:0,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0,sharpen:0,hdr:0,profile:'fullFrame'}));
+    shadow.querySelector('.reset').addEventListener('click',()=>saveFraming({zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,stretch:1,edgeStretch:0,ratio:'auto',cropAspect:'source',customAspect:2.39,autoBars:false,frameTrim:0}));
     shadow.getElementById('compareOriginal').addEventListener('click',()=>{const video=host.__uwfVideo;if(!video?.isConnected||!settings.enabled||!siteAllowed)return;comparisonVideo=comparisonVideo===video?null:video;apply();syncPlayerPanels();refreshDiagnostics();});
     shadow.querySelector('.diagnose').addEventListener('click',refreshDiagnostics);
     host.__uwfPositionPanel=()=>{if(isOpen())positionPanel();};
@@ -576,10 +690,24 @@
       fullscreenButton=button;break search;
     }}
     }
-    let inline=null,floating=null;for(const host of [...playerPanels]){if(!host.isConnected){playerPanels.delete(host);continue;}if(host.__uwfVideo===video){if(host.dataset.uwfFloating)floating=host;else inline=host;}}
-    if(fullscreenButton){if(floating){floating.remove();playerPanels.delete(floating);}if(!inline)createPlayerPanel(fullscreenButton,video);}
-    else if(inline){inline.remove();playerPanels.delete(inline);if(!floating)createPlayerPanel(null,video,true);}
-    else if(floating)positionFloatingPanel(floating);else createPlayerPanel(null,video,true);
+    // The player can replace its control rail while fullscreen/theater mode
+    // changes. Reconcile every injected host to one trigger for the active
+    // video; stale inline and floating hosts otherwise can survive together.
+    const wantFloating=!fullscreenButton;
+    let keeper=null;
+    // Discover hosts from the DOM as well as our in-memory set. The player can
+    // move controls between shadow roots while changing presentation modes;
+    // a moved host may then be missed by the set and leave a second trigger.
+    const knownHosts=new Set(playerPanels);
+    for(const root of roots){try{for(const host of root.querySelectorAll('[data-uwf-host]'))knownHosts.add(host);}catch{}}
+    for(const host of knownHosts){
+      if(!host.isConnected){playerPanels.delete(host);continue;}
+      const matches=host.__uwfVideo===video&&Boolean(host.dataset.uwfFloating)===wantFloating;
+      if(matches&&!keeper)keeper=host;
+      else{host.remove();playerPanels.delete(host);}
+    }
+    if(keeper){playerPanels.add(keeper);if(wantFloating)positionFloatingPanel(keeper);}
+    else createPlayerPanel(fullscreenButton,video,wantFloating);
   }
   document.addEventListener('pointerdown',event=>{for(const host of [...playerPanels]){if(!host.isConnected){playerPanels.delete(host);continue;}const panel=host.shadowRoot?.querySelector('.panel'),trigger=host.shadowRoot?.querySelector('.trigger');if(panel?.hasAttribute('open')&&!host.contains(event.target)){panel.removeAttribute('open');trigger?.setAttribute('aria-expanded','false');}}});
   const inspectVideoMotion=event=>{const path=event.composedPath?.()||[event.target],video=path.find(node=>node instanceof HTMLVideoElement);if(video&&managed.has(video))requestAnimationFrame(()=>safeRun(apply));};
@@ -596,10 +724,10 @@
   loadShortcutConfiguration();
   const observer=new MutationObserver(()=>safeRun(()=>{scanOpenRoots();requestAnimationFrame(()=>safeRun(()=>{apply();injectPlayerPanels()}))}));
   const observeDocument=()=>{if(document.documentElement)observer.observe(document.documentElement,{childList:true,subtree:true});else document.addEventListener('DOMContentLoaded',observeDocument,{once:true});};observeDocument();
-  for(const event of ['play','playing','pause','loadedmetadata','resize','emptied'])document.addEventListener(event,e=>safeRun(()=>{if(e.target instanceof HTMLVideoElement){if(event==='loadedmetadata'||event==='emptied')videoIdentities.delete(e.target);const state=managed.get(e.target);if(state&&(event==='loadedmetadata'||event==='emptied')){state.clipFailed=false;state.barLocked=false;state.detectedBars=null;state.barCandidate=null;state.barCount=0;state.lastBarSample=0;}requestAnimationFrame(()=>safeRun(apply))}}),true);
-  window.addEventListener('resize',scheduleLayout);window.visualViewport?.addEventListener('resize',scheduleLayout);window.visualViewport?.addEventListener('scroll',scheduleLayout);window.addEventListener('orientationchange',scheduleLayout);window.addEventListener('pageshow',scheduleLayout);document.addEventListener('fullscreenchange',beginPresentationChange,true);
+  for(const event of ['play','playing','pause','loadedmetadata','resize','emptied'])document.addEventListener(event,e=>safeRun(()=>{if(e.target instanceof HTMLVideoElement){if(event==='loadedmetadata'||event==='emptied')videoIdentities.delete(e.target);const state=managed.get(e.target);if(state&&!holdsFocusFrame()&&(event==='loadedmetadata'||event==='emptied')){state.clipFailed=false;state.barLocked=false;state.detectedBars=null;state.barCandidate=null;state.barCount=0;state.lastBarSample=0;}requestAnimationFrame(()=>safeRun(apply))}}),true);
+  window.addEventListener('resize',scheduleLayout);window.visualViewport?.addEventListener('resize',scheduleLayout);window.visualViewport?.addEventListener('scroll',scheduleLayout);window.addEventListener('orientationchange',beginPresentationChange);window.addEventListener('blur',lockFocusFrame);window.addEventListener('focus',resumeFocusFrame);window.addEventListener('pageshow',beginPresentationChange);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')resumeFocusFrame();else lockFocusFrame();});document.addEventListener('fullscreenchange',()=>{if(!focusHold){focusReturnUntil=0;beginPresentationChange();}},true);
   window.addEventListener('popstate',scheduleLayout);document.addEventListener('yt-navigate-finish',scheduleLayout);
 
   setInterval(()=>safeRun(()=>{scanOpenRoots();apply();injectPlayerPanels();}),1500);
-  window.addEventListener('pagehide',()=>{for(const v of [...managed.keys()])restore(v);});
+  window.addEventListener('pagehide',event=>{if(!event.persisted)for(const v of [...managed.keys()])restore(v);});
 })();

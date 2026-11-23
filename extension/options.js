@@ -175,7 +175,7 @@ $('site-add').addEventListener('click',()=>task(()=>changeSites({action:'add'},'
 $('site-remove').addEventListener('click',()=>{const site=$('site-list').value;if(site)task(()=>changeSites({action:'remove',site},`${site} listeden kaldırıldı.`));});
 document.querySelectorAll('[data-profile]').forEach(button=>button.addEventListener('click',()=>task(async()=>{
   const id=button.dataset.profile,changes={...UwideProfiles.snapshot(UwideProfiles.builtins[id]),profile:id};
-  if(id==='fullFrame')Object.assign(changes,{autoPicture:false,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0});
+  if(id==='fullFrame')Object.assign(changes,{autoPicture:false,brightness:100,contrast:100,hdr:0,shadowLift:0,saturation:100,vibrance:0,sharpen:0});
   await persist(changes);
   status(id==='fullFrame'?'Tam kare görünüm uygulandı; renk filtresi kapalı.':'Renk profili uygulandı.');
 })));

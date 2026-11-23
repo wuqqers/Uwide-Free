@@ -1,6 +1,33 @@
 # Uwide Free
 
-## 0.4.69
+## 0.4.82
+
+- Include the focus-frame hold from 0.4.81.
+- Keep manual controls visible but disabled in automatic mode, with instructions for enabling manual sizing.
+- Keep color controls visible while disabled and explain neutral defaults. Explicit panel edits release the focus hold immediately.
+- Real extension fixture verified color toggle, brightness application/removal, manual control visibility and manual zoom. Native Windows Alt+Tab remains pending user verification.
+
+
+- Hold the current video framing throughout window blur or page hiding, instead of expiring after 1.2 seconds.
+- Focus return no longer starts a zoom transition. Preserve the frame during a three-second return settling period; actual fullscreen changes while focused still recalculate layout.
+- Restore overwritten owned styles in the mutation observer before the next paint during this hold (bounded to eight repairs to avoid fighting a player indefinitely).
+- Preserve locked crop through same-source metadata events during the hold. Disabling the extension, navigation and video replacement still release ownership.
+- Chromium regression covers a 1.8-second hidden player and a pre-paint style reset. Native Windows Alt+Tab and live YouTube remain unverified.
+
+
+Alt+Tab / focus recovery now retains the selected video and locked black-bar crop during temporary hiding. Delayed player style resets update only the changed style baselines, avoiding compounded zoom. Unrelated player class changes no longer restart recovery. Focus return does not request fullscreen.
+
+Refreshed the compact player panel, popup and settings page. Existing control IDs and storage contracts are retained. Optional edge-weighted stretch can fill internal and external horizontal gaps, capped at 1.6 times the source width; it uses a static map and does not capture video frames. It remains off by default and may add GPU cost or distortion.
+
+Validation: 21 unit tests, three fullscreen enter/exit cycles with delayed style resets, temporary hiding/focus regression, UI layout checks, and rendered edge-stretch pixel checks passed. Native Windows Alt+Tab and live streaming sites still require confirmation. No photosensitivity safety guarantee is made.
+
+## 0.4.74
+
+Desktop settings now use the intended two-column layout, with a sticky sidebar and a wide content area. Static sharpening and shadow recovery are opt-in SVG filters with zero defaults; unchanged filter parameters are not rewritten, and the 340 px panel stays within narrow viewports.
+
+Refreshed the settings, popup and player panel visual system. Added clearer keyboard focus, stable selected tab markers and responsive layouts without adding motion to video. YouTube Shorts remain excluded.
+
+Player control injection now removes stale Uwide buttons belonging to previously selected video elements, preventing duplicate floating and inline triggers.
 
 YouTube Shorts pages are excluded from framing effects and player controls; any previous Uwide video styles are restored.
 
@@ -10,7 +37,7 @@ New compact three-section player panel and popup, with a sticky sidebar in optio
 
 Fullscreen transitions now rebase player styles once after settling, preserving any locked content crop. Invalid intermediate measurements no longer permanently block automatic framing. Live player confirmation is still required.
 
-The feature comparison now records the reference's HDR and sharpening examples: the extension's CSS brightness/contrast sliders do not provide HDR output or detail sharpening. It also documents that linear stretch and global saturation do not equal edge-weighted warping and selective vibrance. Source-video flashes are not analyzed or filtered.
+The feature comparison describes the approximate SVG chroma and SDR highlight curves, as well as paid features that still need different rendering pipelines. Source-video flashes are not analyzed or filtered.
 
 An independent, free Chromium extension prototype based on the requested feature inventory. It does not reuse the bundled Zoom to Fill implementation.
 
@@ -20,7 +47,7 @@ Wuqqers · https://www.omerkayaekici.com/tr/
 
 ## Load locally
 
-1. Extract `Uwide-Free-Chromium-0.4.69.zip`.
+1. Extract `Uwide-Free-Chromium-0.4.82.zip`.
 2. Open chrome://extensions, enable Developer mode and choose Load unpacked.
 3. Select the extracted folder and refresh the video tab.
 4. Open Uwide beside the player's fullscreen control. The extension has no toolbar popup action.
@@ -35,7 +62,7 @@ Read [PHOTOSENSITIVITY.md](PHOTOSENSITIVITY.md) before use. It describes which e
 
 ## Current implementation
 
-Automatic mode offers cover and contain with one uniform scale based on the intrinsic video frame, preserving its aspect ratio. Cover can crop edges; contain keeps the full frame visible and may leave bars. Automatic mode does not apply manual zoom. Manual mode enables framing controls. Picture processing is independently opt-in in both modes; the off-by-default switch applies saved brightness, contrast, saturation and vibrance only when enabled. Embedded black bars can be detected where video pixels are readable. The extension cannot guarantee compatibility with every player; DRM, cross-origin playback and site-specific layouts can limit its behavior.
+Automatic mode offers cover and contain with one uniform scale based on the intrinsic video frame, preserving its aspect ratio. Cover can crop edges; contain keeps the full frame visible and may leave bars. Automatic mode does not apply manual zoom. Manual mode enables framing controls. Picture processing is independently opt-in in both modes; the off-by-default switch applies saved brightness, contrast, saturation, approximate shadow recovery, approximate selective vibrance, SDR highlight emphasis and optional sharpening only when enabled. All static SVG picture effects default to zero and can affect GPU rendering speed. True HDR output is not implemented; SDR highlight emphasis is only a static approximation. Embedded black bars can be detected where video pixels are readable. The extension cannot guarantee compatibility with every player; DRM, cross-origin playback and site-specific layouts can limit its behavior.
 
 0.4.24 temporarily sets `transition: none` on a managed video so page-level CSS transitions do not animate between framing states. The original inline transition is restored when Uwide releases that video.
 

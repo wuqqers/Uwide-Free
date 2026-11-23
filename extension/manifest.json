@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Uwide Free — Video Toolkit",
-  "version": "0.4.69",
+  "version": "0.4.82",
   "description": "Ücretsiz video kadrajı, sabit renk ayarları ve özel profiller.",
   "permissions": [
     "storage",
