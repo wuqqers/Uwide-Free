@@ -1,3 +1,86 @@
+## 0.4.100
+
+- Open full settings for the current video tab from the player. Refresh open settings views after changes made elsewhere.
+- Release shortcut capture on focus loss, allow Tab navigation, and show saved shadow lift values in the popup.
+
+## 0.4.99
+
+- Restore a cleared video scale before the next paint during fullscreen changes. Correct the blocked-site settings hint.
+
+## 0.4.98
+
+- Use a symmetric 480 ms ease-in-out for framing and returning to the original view. Show the motion preference or temporary framing lock in player diagnostics.
+
+## 0.4.97
+
+- Preview edge-weighted stretch as the player slider moves, including layouts that already fill the player.
+- Keep framing transitions available for delayed layout changes while respecting reduced motion and focus and seek holds.
+
+## 0.4.96
+
+- Make stretch work in automatic and manual framing and keep the selected layout when switching modes. Size manual layouts against the player and the visible source picture.
+
+## 0.4.95
+
+- Toggle the saved color filter while keeping full-frame framing. The player, popup and options show the current filter state.
+
+## 0.4.94
+
+- Animate manual contain, cover and stretch through scale changes. Start the transition when a newly discovered video first receives its framing.
+
+## 0.4.93
+
+- Ease framing scale changes and the return to the original size over 240 ms. Honor reduced motion and suppress easing during seek/focus holds.
+
+## 0.4.92
+
+- Retry settings reads after a missing background receiver. Show a reload hint in the player panel if the connection stays unavailable.
+
+## 0.4.91
+
+- Fix Turkish frame-generation messages. Consent given while paused waits for playback of the same video. Skip an isolated irregular frame and stop on repeated timing failures.
+
+## 0.4.90
+
+Experimental frame blending can be enabled for the current video under Picture. It targets 60 presentations per second on steady 30 fps sources up to 1080p, using a blended midpoint only between similar frames. Motion can show double edges. Start requires explicit consent each time. Pause, seek, focus loss or sustained timing problems stop processing. Photosensitivity safety and sustained 60 fps on live platforms have not been established.
+
+## 0.4.89
+
+- Undo the last framing edit and remeasure black bars from the player panel.
+
+## 0.4.88
+
+- Rebuild the player panel and popup around a vertical navigation rail. The player header groups power, move and close controls above a compact inspector.
+
+## 0.4.87
+
+- Choose a color preset from the player picture tab. Theater and Natural skin tones join the existing presets. Color presets preserve framing.
+
+## 0.4.86
+
+- Refresh the in-player settings panel and popup with a widescreen mark, clearer selected tabs and grouped controls. Move panel-position help below the primary settings.
+
+## 0.4.85
+
+- Keep standard YouTube DOM caption windows inside the player with an 8px margin when they overflow its edges. Preserve caption text, timing and accessibility attributes; video framing is unchanged by subtitle cues.
+- Recheck on caption/layout changes and restore owned positioning when protection is no longer needed or the extension is disabled.
+- Applies to standard separate YouTube captions that fit within the player. Burned-in subtitles, oversized captions and captions with a player-owned CSS translate are not covered.
+- Chromium fixture passed bounds, resize, restoration, disable cleanup and text/ARIA preservation checks. Live YouTube verification remains pending.
+
+## 0.4.84
+
+- Preserve the current framing during waiting/buffering even without a seek event; resume layout when playback returns.
+- Detect page/source changes during normal updates, so reused video elements cannot retain the previous video's detected bars when no metadata event arrives.
+- Distinguish replacement MediaStreams by object identity even when currentSrc is empty, including focus/seek holds and per-video storage identity.
+- Synthetic Chromium checks passed for buffering, pause, SPA navigation, stream replacement, seeking and focus recovery. Live platform and quality-switch behavior still requires confirmation.
+
+## 0.4.83
+
+- Preserve locked framing during seeking and a short settling period after seeking ends.
+- Keep detected bars through same-source emptied/loadedmetadata events; reset them when metadata confirms a changed source or page.
+- Repair overwritten owned styles during the seek hold before the next paint, using the existing bounded repair guard.
+- Synthetic Chromium regression covers seek/buffering events and style resets; live YouTube seeking still needs confirmation.
+
 ## 0.4.82
 
 - Include the focus-frame hold from 0.4.81.

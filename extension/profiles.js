@@ -24,14 +24,29 @@ globalThis.UwideProfiles = (() => {
     if (!name || name.length>48) throw new Error('Profil adı 1–48 karakter olmalı.');
     return {id,name,settings:snapshot(values)};
   }
+  const fullFrameLayout={mode:'automatic',ratio:'contain',cropAspect:'source',zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,stretch:1,edgeStretch:0,frameTrim:0,autoBars:false};
+  function isFullFrame(values){
+    return Object.entries(fullFrameLayout).every(([key,value])=>values[key]===value);
+  }
+  function fullFrameChanges(values){
+    if(isFullFrame(values))return {autoPicture:!values.autoPicture};
+    return {...fullFrameLayout,profile:'fullFrame',autoPicture:false};
+  }
+  function renderFullFrame(button,values){
+    const active=isFullFrame(values);
+    button.textContent=active?(values.autoPicture?'Tam kare · filtre açık':'Tam kare · filtre kapalı'):'Tam kareye sığdır';
+    button.title=active?(values.autoPicture?'Renk filtresini kapat':'Renk filtresini aç'):'Videonun tamamını filtresiz göster';
+  }
   const builtins = {
     lift:{brightness:102,contrast:104,saturation:103,vibrance:0},
     movie:{brightness:102,contrast:108,saturation:106,vibrance:0},
+    theater:{brightness:96,contrast:106,saturation:96,vibrance:0},
+    portrait:{brightness:101,contrast:96,saturation:97,vibrance:0},
     sport:{brightness:105,contrast:115,saturation:115,vibrance:0},
     game:{brightness:108,contrast:120,saturation:125,vibrance:0},
     music:{brightness:100,contrast:100,saturation:125,vibrance:15},
     none:{brightness:100,contrast:100,saturation:100,vibrance:0},
-    fullFrame:{mode:'automatic',ratio:'contain',cropAspect:'source',zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,stretch:1,edgeStretch:0,frameTrim:0,autoBars:false,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0,hdr:0}
+    fullFrame:{...fullFrameLayout,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0,hdr:0}
   };
   const format='uwide-free-profiles',version=1,maxBytes=128*1024;
   function exportBundle(profiles){
@@ -56,5 +71,5 @@ globalThis.UwideProfiles = (() => {
     }
     return {profiles:[...existing,...added],added};
   }
-  return {snapshot,make,builtins,exportBundle,importBundle,maxBytes};
+  return {snapshot,make,builtins,renderFullFrame,fullFrameChanges,exportBundle,importBundle,maxBytes};
 })();

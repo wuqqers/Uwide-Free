@@ -37,10 +37,12 @@
   function candidates(){scanOpenRoots();const found=new Set();for(const root of roots)for(const v of root.querySelectorAll('video'))if(v.isConnected&&v.videoWidth>0&&visible(v))found.add(v);return [...found];}
   function rank(v){const playing=!v.paused&&!v.ended;const area=Math.min(v.offsetWidth*v.offsetHeight,1e9);return area*(playing?1.25:1)+(v.currentTime>0?1e5:0);}
   let selectedVideo=null,selectionMissingSince=null,selectionPage='';
-  let focusHold=false,focusReturnUntil=0,focusRepairs=0,focusMedia='';
-  function holdsFocusFrame(){return !!(selectedVideo?.isConnected&&selectionPage===location.href&&selectedVideo.currentSrc===focusMedia&&(focusHold||performance.now()<focusReturnUntil));}
-  function lockFocusFrame(){focusHold=true;focusMedia=selectedVideo?.currentSrc||'';focusRepairs=0;focusReturnUntil=0;smoothPresentationUntil=0;if(fullscreenSettleTimer){clearTimeout(fullscreenSettleTimer);fullscreenSettleTimer=0;}const state=selectedVideo&&managed.get(selectedVideo);if(state)set(selectedVideo,'transition','none');}
-  function resumeFocusFrame(){if(!focusHold)focusMedia=selectedVideo?.currentSrc||'';focusHold=false;focusReturnUntil=performance.now()+3000;focusRepairs=0;smoothPresentationUntil=0;scheduleLayout();}
+  let seekHold=false,seekReturnUntil=0,seekVideo=null,seekSource='',seekPage='',seekObject=null;
+  function holdsSeekFrame(){return !!(seekVideo?.isConnected&&seekVideo===selectedVideo&&seekPage===location.href&&seekSource===seekVideo.currentSrc&&seekObject===seekVideo.srcObject&&(seekHold||performance.now()<seekReturnUntil));}
+  let focusHold=false,focusReturnUntil=0,focusRepairs=0,focusMedia='',focusObject=null;
+  function holdsFocusFrame(){return holdsSeekFrame()||!!(selectedVideo?.isConnected&&selectionPage===location.href&&selectedVideo.currentSrc===focusMedia&&selectedVideo.srcObject===focusObject&&(focusHold||performance.now()<focusReturnUntil));}
+  function lockFocusFrame(){focusHold=true;focusMedia=selectedVideo?.currentSrc||'';focusObject=selectedVideo?.srcObject||null;focusRepairs=0;focusReturnUntil=0;if(fullscreenSettleTimer){clearTimeout(fullscreenSettleTimer);fullscreenSettleTimer=0;}const state=selectedVideo&&managed.get(selectedVideo);if(state)set(selectedVideo,'transition','none');}
+  function resumeFocusFrame(){if(!focusHold){focusMedia=selectedVideo?.currentSrc||'';focusObject=selectedVideo?.srcObject||null;}focusHold=false;focusReturnUntil=performance.now()+3000;focusRepairs=0;scheduleLayout();}
   function activeVideo(){
     // Browsers and players can temporarily hide the same video during app/mode
     // switches. Keep its identity and locked crop through that short gap.
@@ -58,16 +60,42 @@
     selectedVideo=best;selectionPage=location.href;return best;
   }
   function isYouTubeShorts(){return /(^|\.)youtube\.com$/i.test(location.hostname)&&/^\/shorts(?:\/|$)/i.test(location.pathname);}
-  function remember(v){if(managed.has(v))return managed.get(v);const props={};for(const p of originalProps)props[p]={value:v.style.getPropertyValue(p),priority:v.style.getPropertyPriority(p)};const computed=getComputedStyle(v),origin=computed.transformOrigin.split(/\s+/),width=Math.max(1,v.offsetWidth),height=Math.max(1,v.offsetHeight);const originPercent=origin.slice(0,2).map((part,index)=>{const value=parseFloat(part),size=index?height:width;return Number.isFinite(value)?`${value/size*100}%`:part;}).join(' ');const m={props,expected:{},baseTransform:computed.transform,baseFilter:computed.filter,baseObjectPosition:computed.objectPosition,baseTransformOrigin:originPercent,clipFailed:false};managed.set(v,m);return m;}
+  function remember(v){if(managed.has(v))return managed.get(v);const props={};for(const p of originalProps)props[p]={value:v.style.getPropertyValue(p),priority:v.style.getPropertyPriority(p)};const computed=getComputedStyle(v),origin=computed.transformOrigin.split(/\s+/),width=Math.max(1,v.offsetWidth),height=Math.max(1,v.offsetHeight);const originPercent=origin.slice(0,2).map((part,index)=>{const value=parseFloat(part),size=index?height:width;return Number.isFinite(value)?`${value/size*100}%`:part;}).join(' ');const m={props,expected:{},baseTransform:computed.transform,baseFilter:computed.filter,baseObjectPosition:computed.objectPosition,baseTransformOrigin:originPercent,clipFailed:false,mediaObject:v.srcObject,mediaSignature:location.href+'\n'+v.currentSrc};managed.set(v,m);return m;}
+  function reconcileMedia(video){
+    const state=managed.get(video);if(!state)return;
+    // Empty metadata during buffering is not evidence of a new source.
+    if(!video.videoWidth)return;
+    const signature=location.href+'\n'+video.currentSrc;
+    if(state.mediaSignature===signature&&state.mediaObject===video.srcObject)return;
+    state.mediaSignature=signature;state.mediaObject=video.srcObject;state.rescanning=false;
+    state.clipFailed=false;state.barLocked=false;state.detectedBars=null;state.barCandidate=null;state.barCount=0;state.lastBarSample=0;
+    videoIdentities.delete(video);
+  }
   function sameInline(v,p,entry){return v.style.getPropertyValue(p)===entry.value&&v.style.getPropertyPriority(p)===entry.priority;}
-  function restore(v){
+  const frameTiming={duration:480,easing:'ease-in-out'};
+  const frameTransition=`transform ${frameTiming.duration}ms ${frameTiming.easing}`;
+  const returningFrames=new WeakMap();
+  function smoothFrameAllowed(){
+    return !document.hidden&&!holdsFocusFrame()&&!matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+  function restore(v,animate=false){
     const m=managed.get(v);if(!m)return;
+    const from=animate&&smoothFrameAllowed()&&m.expected.transform&&sameInline(v,'transform',m.expected.transform)&&!m.styleConflict&&!m.animationConflict?getComputedStyle(v).transform:null;
     // Restore only values still owned by us; preserve later author changes.
     for(const [p,expected] of Object.entries(m.expected)){
       if(!sameInline(v,p,expected))continue;
       const original=m.props[p];if(original.value)v.style.setProperty(p,original.value,original.priority);else v.style.removeProperty(p);
     }
     managed.delete(v);updateCompatibilityStatus(v,null);
+    if(from){
+      const to=getComputedStyle(v).transform;
+      if(from!==to){
+        const motion=v.animate([{transform:from},{transform:to}],frameTiming);
+        returningFrames.set(v,motion);
+        const cleanup=()=>{if(returningFrames.get(v)===motion)returningFrames.delete(v);};
+        motion.finished.then(cleanup,cleanup);
+      }
+    }
   }
   function set(v,p,value){
     if(v.style.getPropertyValue(p)!==value||v.style.getPropertyPriority(p)!=='important')v.style.setProperty(p,value,'important');
@@ -75,12 +103,12 @@
   }
   function updateCompatibilityStatus(video,state){
     const conflict=state?.styleConflict||state?.animationConflict;
-    const message=!siteAllowed?'Bu site izinli siteler listesinde değil. Eklemek için araç çubuğundaki Uwide simgesini açın.':conflict?`Video görünümünde stil çakışması algılandı (${conflict}). Karşılıklı yazmayı ve olası görüntü bozulmasını önlemek için Uwide bu videoda bekliyor.`:'';
+    const message=settingsConnectionIssue||(!siteAllowed?'Bu site izinli siteler listesinde değil. Eklemek için eklenti seçeneklerindeki Siteler bölümünü açın.':conflict?`Video görünümünde stil çakışması algılandı (${conflict}). Karşılıklı yazmayı ve olası görüntü bozulmasını önlemek için Uwide bu videoda bekliyor.`:'');
     for(const host of playerPanels){if(host.__uwfVideo!==video)continue;const node=host.shadowRoot?.querySelector('.compat-status');if(node){if(node.textContent!==message)node.textContent=message;node.hidden=!message;}}
   }
   function isOwnedTransformTransition(video,animation){
     const state=managed.get(video);
-    return animation.transitionProperty==='transform'&&state?.expected.transform&&state.expected.transition?.value.startsWith('transform 240ms')&&sameInline(video,'transform',state.expected.transform)&&sameInline(video,'transition',state.expected.transition);
+    return animation.transitionProperty==='transform'&&state?.expected.transform&&state.expected.transition&&video.style.transitionProperty==='transform'&&sameInline(video,'transform',state.expected.transform)&&sameInline(video,'transition',state.expected.transition);
   }
   function rebasePresentationStyles(video,state){
     const changed=Object.entries(state.expected).filter(([property,expected])=>!sameInline(video,property,expected)).map(([property])=>property);
@@ -88,7 +116,7 @@
     // Do not restore the other owned properties: their baselines and crop remain
     // valid. Cancel only our transition before reading a changed author transform.
     for(const animation of video.getAnimations?.()||[]){
-      if(animation.transitionProperty==='transform'&&state.expected.transition?.value.startsWith('transform 240ms')&&sameInline(video,'transition',state.expected.transition))animation.cancel();
+      if(state.expected.transition&&animation.transitionProperty==='transform'&&video.style.transitionProperty==='transform'&&sameInline(video,'transition',state.expected.transition))animation.cancel();
     }
     for(const property of changed){state.props[property]={value:video.style.getPropertyValue(property),priority:video.style.getPropertyPriority(property)};delete state.expected[property];}
     const computed=getComputedStyle(video);
@@ -132,21 +160,25 @@
     const sourceLeft=(width-sourceWidth)/2;
     const outerGap=Math.max(0,(targetWidth/Math.max(.01,scaleX)-width)/2);
     const available=sourceLeft+outerGap;
-    if(available<1||sourceWidth<1)return {signature,width,height,scale:0,data:null};
+    if(sourceWidth<1)return {signature,width,height,scale:0,data:null};
     // A monotonic tanh map keeps the middle close to 1:1 and spends more
     // distortion near the edges. The overall width is capped at 1.6×.
     const extension=Math.min(available,sourceWidth*.3)*strength/100;
-    if(extension<.25)return {signature,width,height,scale:0,data:null};
+
     const destinationLeft=sourceLeft-extension,destinationWidth=sourceWidth+2*extension,stretchRatio=destinationWidth/sourceWidth;
     let low=0,high=20,k=0;
     if(stretchRatio>1.00001){for(let iteration=0;iteration<24;iteration++){k=(low+high)/2;const ratio=k/(2*Math.tanh(k/2));if(ratio<stretchRatio)low=k;else high=k;}}
     const mapWidth=Math.min(4096,Math.max(64,Math.ceil(destinationWidth))),canvas=document.createElement('canvas');canvas.width=mapWidth;canvas.height=1;
     const context=canvas.getContext('2d');if(!context)return {signature,width,height,scale:0,data:null};
-    const image=context.createImageData(mapWidth,1),scale=2*extension;
+    const image=context.createImageData(mapWidth,1),redistribution=sourceWidth*.09*strength/100;
+    // Keep the endpoints and centre anchored even when cover already fills
+    // the player. The cubic term redistributes width towards the edges.
+    const scale=2*(extension+redistribution);
     for(let index=0;index<mapWidth;index++){
       const x=destinationLeft+(index+.5)/mapWidth*destinationWidth,t=(x-destinationLeft)/destinationWidth-.5;
       const sourceFraction=k>0?.5+.5*Math.tanh(k*t)/Math.tanh(k/2):t+.5;
-      const displacement=sourceLeft+sourceFraction*sourceWidth-x,offset=index*4;
+      const u=2*t;
+      const displacement=sourceLeft+sourceFraction*sourceWidth-x+redistribution*u*(1-u*u),offset=index*4;
       image.data[offset]=Math.round(clamp(127.5+displacement/scale*255,0,255));image.data[offset+1]=128;image.data[offset+2]=0;image.data[offset+3]=255;
     }
     try{context.putImageData(image,0,0);return {signature,width,height,scale,data:canvas.toDataURL('image/png'),destinationLeft,destinationWidth};}
@@ -241,8 +273,9 @@
       top:(height-visibleHeight)/2/height*100,
       left:(width-cropWidth)/2/width*100};
   }
+  const edgePreview=new WeakMap();
   function render(v){
-    if(!v)return;const remembered=remember(v);if(hasStyleConflict(v,remembered))return;
+    if(!v)return;returningFrames.get(v)?.cancel();const remembered=remember(v);if(hasStyleConflict(v,remembered))return;
     if(settings.mode!=='manual'){
       const box=targetBox(v),w=Math.max(1,v.offsetWidth),h=Math.max(1,v.offsetHeight),state=managed.get(v);
       const base=state.baseTransform&&state.baseTransform!=='none'?state.baseTransform+' ':'';
@@ -254,23 +287,23 @@
       const visibleHeight=imageHeight*(1-((bars?.top||0)+(bars?.bottom||0))/100);
       // Avoid style churn from tiny fractional ResizeObserver noise while
       // retaining sub-pixel sizing accuracy on large players.
-      const scaleX=box.width/visibleWidth,scaleY=box.height/visibleHeight,baseScale=settings.ratio==='contain'?Math.min(scaleX,scaleY):Math.max(scaleX,scaleY),wheelScale=settings.playerWheelZoom?clamp(settings.wheelScale,1,2.5):1,scale=Math.round(Math.min(2.5,baseScale*wheelScale*clamp(settings.shortcutScale,1,2.5))*10000)/10000;
-      // A transient layout measurement must not disable later valid fits.
-      if(!Number.isFinite(scale)||scale<.5||scale>2.5)return;
-      // Use one uniform scale in both layouts. Cover fills the player and may
-      // crop edges; contain preserves the whole frame and may leave letterboxes.
-      // Apply each sizing update in one paint; author transitions on the video
-      // element can otherwise animate intermediate crop/scale states.
-      const smooth=performance.now()<smoothPresentationUntil&&!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-      set(v,'transition',smooth?'transform 240ms cubic-bezier(.2,.75,.25,1)':'none');
-      set(v,'transform',base+'scale('+scale+')');
+      const fitX=box.width/visibleWidth,fitY=box.height/visibleHeight;
+      const uniform=settings.ratio==='contain'?Math.min(fitX,fitY):Math.max(fitX,fitY);
+      const zoom=(settings.playerWheelZoom?clamp(settings.wheelScale,1,2.5):1)*clamp(settings.shortcutScale,1,2.5);
+      const scaled=value=>Math.round(Math.min(2.5,value*zoom)*10000)/10000;
+      const scale=scaled(settings.ratio==='fill'?fitX:uniform);
+      const verticalScale=scaled(settings.ratio==='fill'?fitY:uniform);
+      if(![scale,verticalScale].every(value=>Number.isFinite(value)&&value>0))return;
+      const smooth=smoothFrameAllowed();
+      set(v,'transition',smooth?frameTransition:'none');
+      set(v,'transform',base+(scale===verticalScale?`scale(${scale})`:`scale(${scale},${verticalScale})`));
       set(v,'object-position',state.baseObjectPosition||'50% 50%');set(v,'transform-origin','center center');set(v,'object-fit','contain');
       const clipTop=bars?((h-imageHeight)/2+imageHeight*bars.top/100)/h*100:0;
       const clipRight=bars?((w-imageWidth)/2+imageWidth*bars.right/100)/w*100:0;
       const clipBottom=bars?((h-imageHeight)/2+imageHeight*bars.bottom/100)/h*100:0;
       const clipLeft=bars?((w-imageWidth)/2+imageWidth*bars.left/100)/w*100:0;
       set(v,'clip-path',bars?`inset(${clipTop}% ${clipRight}% ${clipBottom}% ${clipLeft}%)`:'none');
-      const baseFilter=state.baseFilter&&state.baseFilter!=='none'?state.baseFilter:'';const pictureFilter=staticPictureFilter(v,settings.autoPicture?settings.shadowLift:0,settings.autoPicture?settings.sharpen:0,settings.autoPicture?settings.vibrance:0,settings.autoPicture?settings.hdr:0,settings.edgeStretch,'contain',box.width,scale);const picture=settings.autoPicture?`brightness(${clamp(settings.brightness,0,200)}%) contrast(${clamp(settings.contrast,0,200)}%) saturate(${clamp(settings.saturation,0,250)}%)`:'';set(v,'filter',[baseFilter,picture,pictureFilter].filter(Boolean).join(' ')||'none');set(v,'box-shadow','none');set(v,'will-change','auto');return;
+      const baseFilter=state.baseFilter&&state.baseFilter!=='none'?state.baseFilter:'';const pictureFilter=staticPictureFilter(v,settings.autoPicture?settings.shadowLift:0,settings.autoPicture?settings.sharpen:0,settings.autoPicture?settings.vibrance:0,settings.autoPicture?settings.hdr:0,edgePreview.get(v)??settings.edgeStretch,'contain',box.width,scale);const picture=settings.autoPicture?`brightness(${clamp(settings.brightness,0,200)}%) contrast(${clamp(settings.contrast,0,200)}%) saturate(${clamp(settings.saturation,0,250)}%)`:'';set(v,'filter',[baseFilter,picture,pictureFilter].filter(Boolean).join(' ')||'none');set(v,'box-shadow','none');set(v,'will-change','auto');return;
     }
     const box=targetBox(v), elementWidth=Math.max(1,v.offsetWidth),elementHeight=Math.max(1,v.offsetHeight);
     // In fill mode, cover the rendered player box. This removes the outer bars
@@ -278,17 +311,23 @@
     const state=managed.get(v),trim=clamp(settings.frameTrim,0,25),bars=settings.autoBars&&settings.cropAspect==='source'?state.detectedBars:null;
     const remainingWidth=Math.max(.1,1-((bars?.left||0)+(bars?.right||0))/100);
     const remainingHeight=Math.max(.1,1-(2*trim+(bars?.top||0)+(bars?.bottom||0))/100);
-    const cover=settings.ratio==='auto'||settings.ratio==='cover' ? Math.max(box.width/(elementWidth*remainingWidth),box.height/(elementHeight*remainingHeight)) : 1;
+    const sourceWidth=v.videoWidth||elementWidth,sourceHeight=v.videoHeight||elementHeight;
+    const fit=Math.min(elementWidth/sourceWidth,elementHeight/sourceHeight);
+    const targetX=box.width/(sourceWidth*fit),targetY=box.height/(sourceHeight*fit);
+    const cover=Math.max(targetX/remainingWidth,targetY/remainingHeight);
+    const uniform=settings.ratio==='contain'?Math.min(targetX,targetY):cover;
+    const pictureX=settings.ratio==='fill'?targetX:uniform;
+    const pictureY=settings.ratio==='fill'?targetY:uniform;
     const wheelScale=settings.playerWheelZoom?clamp(settings.wheelScale,1,2.5):1,zoom=clamp(settings.zoom*wheelScale,1,2.5), sx=clamp(settings.stretch,1,2);
     const tx=clamp(settings.panX,-50,50),ty=clamp(settings.panY,-50,50);
     const baseTransform=state?.baseTransform&&state.baseTransform!=='none'?`${state.baseTransform} `:'';
     const aspectFrame=aspectFrameGeometry({width:elementWidth,height:elementHeight,videoWidth:v.videoWidth,videoHeight:v.videoHeight,targetWidth:box.width,targetHeight:box.height,cropAspect:settings.cropAspect,customAspect:settings.customAspect,trim:settings.frameTrim,layout:settings.ratio,zoom,stretch:settings.stretch});
-    const edgeFit=aspectFrame||settings.ratio==='contain'?'contain':'cover';
-    const pictureFilter=staticPictureFilter(v,settings.autoPicture?settings.shadowLift:0,settings.autoPicture?settings.sharpen:0,settings.autoPicture?settings.vibrance:0,settings.autoPicture?settings.hdr:0,settings.edgeStretch,edgeFit,box.width,aspectFrame?.scaleX??cover*zoom*sx);
+    const edgeFit='contain';
+    const pictureFilter=staticPictureFilter(v,settings.autoPicture?settings.shadowLift:0,settings.autoPicture?settings.sharpen:0,settings.autoPicture?settings.vibrance:0,settings.autoPicture?settings.hdr:0,edgePreview.get(v)??settings.edgeStretch,edgeFit,box.width,aspectFrame?.scaleX??pictureX*zoom*sx);
     // Color processing remains opt-in; edge geometry is an independent framing control.
     const filters=settings.autoPicture?[`brightness(${clamp(settings.brightness,0,200)}%)`,`contrast(${clamp(settings.contrast,0,200)}%)`,`saturate(${clamp(settings.saturation,0,250)}%)`].join(' '):'';
-    const smooth=performance.now()<smoothPresentationUntil&&!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    set(v,'transition',smooth?'transform 240ms cubic-bezier(.2,.75,.25,1)':'none');
+    const smooth=smoothFrameAllowed();
+    set(v,'transition',smooth?frameTransition:'none');
     if(aspectFrame){
       set(v,'object-fit','contain');set(v,'object-position','50% 50%');set(v,'transform-origin','center center');
       set(v,'transform',`${baseTransform}scale(${aspectFrame.scaleX},${aspectFrame.scaleY}) translate(${tx}%,${ty}%)`);
@@ -297,12 +336,12 @@
       set(v,'will-change','auto');renderGlow(v);return;
     }
     set(v,'object-position',state.baseObjectPosition||'50% 50%');
-    set(v,'transform',`${baseTransform}scale(${cover*zoom*sx},${cover*zoom}) translate(${tx}%,${ty}%)`);
+    // object-fit jumps between contain and cover in one paint. Keep the
+    // same fitted picture and express the difference as an animatable scale.
+    set(v,'object-fit','contain');
+    set(v,'transform',`${baseTransform}scale(${zoom*sx*pictureX},${zoom*pictureY}) translate(${tx/pictureX}%,${ty/pictureY}%)`);
     set(v,'transform-origin',state?.baseTransformOrigin||'center center');set(v,'filter',[state?.baseFilter&&state.baseFilter!=='none'?state.baseFilter:'',filters,pictureFilter].filter(Boolean).join(' ')||'none');set(v,'will-change','transform');
     renderGlow(v);
-    if(settings.ratio==='contain')set(v,'object-fit','contain');
-    else if(settings.ratio==='fill')set(v,'object-fit','fill');
-    else set(v,'object-fit','cover');
     applyCrop(v,bars?.top||0,bars?.bottom||0,bars?.left||0,bars?.right||0);
   }
   // Pixel readback is best effort. Protected and cross-origin media can reject it.
@@ -331,20 +370,59 @@
       for(let y=height*.3|0;y<height*.7;y+=3)for(let x=width*.3|0;x<width*.7;x+=3){center+=luma(x,y);count++;}
       const pairedHorizontal=top>=3&&bottom>=3&&Math.abs(top-bottom)<=3;
       const pairedVertical=left>=4&&right>=4&&Math.abs(left-right)<=4;
-      if(center/Math.max(1,count)<36||!pairedHorizontal&&!pairedVertical){state.barCandidate=null;state.barCount=0;return false;}
+      if(center/Math.max(1,count)<36||(!state.rescanning&&!pairedHorizontal&&!pairedVertical)){state.barCandidate=null;state.barCount=0;return false;}
       const bars={top:pairedHorizontal?top*100/height:0,bottom:pairedHorizontal?bottom*100/height:0,left:pairedVertical?left*100/width:0,right:pairedVertical?right*100/width:0};
       const key=Object.values(bars).map(value=>Math.round(value/2)).join(':');
       if(key!==state.barCandidate){state.barCandidate=key;state.barCount=1;state.barCandidateSince=now;return false;}
       state.barCount++;
       if(state.barCount<4||now-state.barCandidateSince<4500)return false;
-      state.detectedBars=bars;state.barLocked=true;return true;
+      state.detectedBars=pairedHorizontal||pairedVertical?bars:null;state.rescanning=false;state.barLocked=true;return true;
     }catch{
       state.clipFailed=true;sampleCanvas=sampleContext=null;return false;
     }
   }
+  // Keep YouTube's existing caption nodes readable without copying their text
+  // or changing the video's crop whenever a subtitle cue appears.
+  const captionOffsets=new Map();let captionPlayer=null,captionFrame=0;
+  function releaseCaption(node,state){
+    if(node.style.getPropertyValue('translate')===state.expected&&node.style.getPropertyPriority('translate')==='important'){
+      if(state.original)node.style.setProperty('translate',state.original,state.priority);else node.style.removeProperty('translate');
+    }
+    captionResize?.unobserve(node);captionOffsets.delete(node);
+  }
+  function queueCaptionProtection(){if(captionFrame)return;captionFrame=requestAnimationFrame(()=>{captionFrame=0;safeRun(protectCaptions);});}
+  const captionObserver=new MutationObserver(queueCaptionProtection);
+  const captionResize=typeof ResizeObserver==='function'?new ResizeObserver(queueCaptionProtection):null;
+  function protectCaptions(){
+    const video=selectedVideo;
+    const player=settings.enabled&&!isYouTubeShorts()&&/(^|\.)youtube(?:-nocookie)?\.com$/i.test(location.hostname)?video?.closest('.html5-video-player'):null;
+    if(player!==captionPlayer){captionObserver.disconnect();captionResize?.disconnect();for(const [node,state] of captionOffsets)releaseCaption(node,state);captionPlayer=player;if(player){captionObserver.observe(player,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['style','class']});captionResize?.observe(player);}}
+    if(!player)return;
+    const bounds=player.getBoundingClientRect();if(bounds.width<80||bounds.height<60)return;
+    const nodes=new Set(player.querySelectorAll('.caption-window'));
+    for(const [node,state] of captionOffsets)if(!nodes.has(node))releaseCaption(node,state);
+    for(const node of nodes){
+      let state=captionOffsets.get(node);
+      if(state&&(node.style.getPropertyValue('translate')!==state.expected||node.style.getPropertyPriority('translate')!=='important')){captionOffsets.delete(node);state=null;}
+      // Respect a player's own translate rather than replacing its positioning.
+      if(!state&&getComputedStyle(node).translate!=='none')continue;
+      const rect=node.getBoundingClientRect();if(!rect.width||!rect.height||getComputedStyle(node).visibility==='hidden')continue;
+      const scaleX=rect.width/Math.max(1,node.offsetWidth),scaleY=rect.height/Math.max(1,node.offsetHeight);
+      const baseLeft=rect.left-(state?.x||0)*scaleX,baseTop=rect.top-(state?.y||0)*scaleY;
+      const minX=bounds.left+8,maxX=bounds.right-8-rect.width,minY=bounds.top+8,maxY=bounds.bottom-8-rect.height;
+      // Oversized captions cannot be made fully visible by moving them alone.
+      if(maxX<minX||maxY<minY)continue;
+      const x=Math.round((Math.min(maxX,Math.max(minX,baseLeft))-baseLeft)/scaleX*100)/100;
+      const y=Math.round((Math.min(maxY,Math.max(minY,baseTop))-baseTop)/scaleY*100)/100;
+      if(!x&&!y){if(state)releaseCaption(node,state);continue;}
+      if(!state){state={original:node.style.getPropertyValue('translate'),priority:node.style.getPropertyPriority('translate')};captionOffsets.set(node,state);captionResize?.observe(node);}
+      state.x=x;state.y=y;state.expected=`${x}px ${y}px`;
+      if(node.style.getPropertyValue('translate')!==state.expected||node.style.getPropertyPriority('translate')!=='important')node.style.setProperty('translate',state.expected,'important');
+    }
+  }
   function scheduleLayout(){if(layoutFrame)return;layoutFrame=requestAnimationFrame(()=>{layoutFrame=0;safeRun(()=>{apply();injectPlayerPanels();for(const host of playerPanels)host.__uwfPositionPanel?.();});});}
-  let fullscreenSettleTimer=0,presentationDeadline=0,presentationRetries=0,presentationSignature='',smoothPresentationUntil=0;
-  function beginPresentationChange(){if(holdsFocusFrame())return;presentationDeadline=performance.now()+3000;smoothPresentationUntil=performance.now()+900;presentationRetries=2;scheduleFullscreenLayout();}
+  let fullscreenSettleTimer=0,presentationDeadline=0,presentationRetries=0,presentationSignature='';
+  function beginPresentationChange(){if(holdsFocusFrame())return;presentationDeadline=performance.now()+3000;presentationRetries=2;scheduleFullscreenLayout();}
   const presentationStyleObserver=new MutationObserver(()=>safeRun(()=>{
     const video=resizeObservedVideo,state=video&&managed.get(video);
     if(state&&holdsFocusFrame()&&settings.enabled&&comparisonVideo!==video){
@@ -355,6 +433,14 @@
     // Only retry author changes during a bounded presentation transition.
     // Our own writes match expected values and must never trigger a retry loop.
     if(!state||performance.now()>presentationDeadline||presentationRetries<=0)return;
+    const transform=state.expected.transform;
+    if(settings.enabled&&comparisonVideo!==video&&transform&&!sameInline(video,'transform',transform)&&sameInline(video,'transform',state.props.transform)){
+      // A player cleared our scale after resizing. Restore it before the
+      // browser paints the reset, then measure the new player dimensions.
+      presentationRetries--;
+      video.style.setProperty('transform',transform.value,transform.priority);
+      scheduleLayout();
+    }
     if(Object.entries(state.expected).some(([property,expected])=>!sameInline(video,property,expected)))scheduleFullscreenLayout();
   }));
   const presentationModeObserver=new MutationObserver(records=>safeRun(()=>{
@@ -402,10 +488,10 @@
     if(!video||!video.isConnected||!video.videoWidth)return null;
     const signature=location.href+'\n'+video.currentSrc;
     let identity=videoIdentities.get(video);
-    if(!identity||identity.signature!==signature){identity={signature,token:globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random()}`};videoIdentities.set(video,identity);}
+    if(!identity||identity.signature!==signature||identity.mediaObject!==video.srcObject){identity={signature,mediaObject:video.srcObject,token:globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random()}`};videoIdentities.set(video,identity);}
     return identity.token;
   }
-  function apply(){if(applying)return;applying=true;try{if(isYouTubeShorts()){for(const v of [...managed.keys()])restore(v);selectedVideo=null;return;}const current=activeVideo();if(comparisonVideo&&comparisonVideo!==current)comparisonVideo=null;observeVideoLayout(current);const token=videoTokenFor(current);if(token!==reportedVideoToken){reportedVideoToken=token;chrome.runtime.sendMessage({type:'uwf-media-updated'}).catch(()=>{});}if(settingsScope==='video'&&token!==appliedVideoToken){appliedVideoToken=token;settings={...settingsBaseline};loadSettings();}for(const v of [...managed.keys()])if(!v.isConnected||!settings.enabled||v!==current)restore(v);if(settings.enabled&&current&&!document.hidden&&!holdsFocusFrame()&&visible(current)){if(comparisonVideo===current)restore(current);else{render(current);if(sampleBars(current))render(current);}}}finally{applying=false;}}
+  function apply(){if(applying)return;applying=true;try{if(isYouTubeShorts()){for(const v of [...managed.keys()])restore(v);selectedVideo=null;return;}const current=activeVideo();if(current)reconcileMedia(current);if(comparisonVideo&&comparisonVideo!==current)comparisonVideo=null;observeVideoLayout(current);const token=videoTokenFor(current);if(token!==reportedVideoToken){reportedVideoToken=token;chrome.runtime.sendMessage({type:'uwf-media-updated'}).catch(()=>{});}if(settingsScope==='video'&&token!==appliedVideoToken){appliedVideoToken=token;settings={...settingsBaseline};loadSettings();}for(const v of [...managed.keys()])if(!v.isConnected||!settings.enabled||v!==current)restore(v,v===current&&!settings.enabled);if(settings.enabled&&current&&!document.hidden&&!holdsFocusFrame()&&visible(current)){if(comparisonVideo===current)restore(current,true);else{render(current);if(sampleBars(current)){render(current);}}}}finally{applying=false;queueCaptionProtection();}}
   // Audio-reactive effects are disabled, including previously saved settings.
   let settingsLoad=0,saveQueue=Promise.resolve(),settingsScope='global',settingsScopeInfo=null,appliedVideoToken=null,settingsBaseline={...defaults},keyboardShortcutConfig={enabled:false,bindings:{}};
   const shortcutActionNames=['toggleFit','resetFraming','zoomIn','zoomOut','toggleBars','togglePicture','cycleAspect','toggleTheater'];
@@ -433,24 +519,61 @@
       const aspects=['source','16:9','16:10','18:9','21:9','32:9','4:3','1:1','custom'],index=aspects.indexOf(settings.cropAspect);saveFraming({cropAspect:aspects[(index+1)%aspects.length],mode:'manual'});
     }
   }
+  let settingsConnectionIssue='';
+  function connectionStatus(message){
+    settingsConnectionIssue=message;
+    for(const host of playerPanels)updateCompatibilityStatus(host.__uwfVideo,managed.get(host.__uwfVideo));
+  }
+  async function readSettingsWithRetry(request){
+    for(const delay of [0,200,700,1800]){
+      if(delay)await new Promise(resolve=>setTimeout(resolve,delay));
+      if(request!==settingsLoad)return null;
+      try{
+        if(!chrome.runtime.id)break;
+        return await chrome.runtime.sendMessage({type:'uwf-settings-read',videoToken:videoTokenFor(activeVideo())});
+      }catch(error){
+        const message=String(error?.message||error);
+        if(/extension context invalidated/i.test(message))break;
+        if(!/receiving end does not exist/i.test(message))throw error;
+      }
+    }
+    if(request===settingsLoad)connectionStatus('Eklenti bağlantısı kurulamadı. Video sekmesini yenileyin.');
+    return null;
+  }
   function loadSettings(){
     const request=++settingsLoad;
-    chrome.runtime.sendMessage({type:'uwf-settings-read',videoToken:videoTokenFor(activeVideo())}).then(response=>safeRun(()=>{
-      if(request!==settingsLoad)return;
+    return readSettingsWithRetry(request).then(response=>safeRun(()=>{
+      if(request!==settingsLoad||response===null)return;
+      if(settingsConnectionIssue)connectionStatus('');
       if(!response?.ok)throw new Error(response?.error||'Ayarlar yüklenemedi.');
       siteAllowed=response.siteAllowed!==false;
       settings={...response.values,enabled:response.values.enabled&&siteAllowed};settingsBaseline={...response.baseline,enabled:response.baseline.enabled&&siteAllowed};appliedVideoToken=response.videoToken;siteHost=response.host;settingsScope=response.scope;settingsScopeInfo=response;
       apply();injectPlayerPanels();syncPlayerPanels();
     })).catch(error=>safeRun(()=>{throw error;}));
   }
-  function saveFraming(changes){
+  const framingKeys = new Set(['mode','ratio','zoom','panX','panY','stretch','edgeStretch','cropAspect','customAspect','frameTrim','wheelScale','shortcutScale']);
+  let framingUndo=null;
+  function framingContext(){return JSON.stringify([videoTokenFor(activeVideo()), settingsScope,settingsScopeInfo?.categoryScopes?.framing]);}
+  function saveFraming(changes,recordUndo=true){
     // An explicit panel edit takes precedence over the passive focus hold.
-    focusHold=false;focusReturnUntil=0;smoothPresentationUntil=0;
+    focusHold=false;focusReturnUntil=0;seekHold=false;seekReturnUntil=0;
     saveQueue=saveQueue.then(async()=>{
-      const response=await chrome.runtime.sendMessage({type:'uwf-settings-write',changes,videoToken:videoTokenFor(activeVideo())});
+      const videoToken=videoTokenFor(activeVideo());
+      let previous=settings;
+      if(typeof changes==='function'){
+        const current=await chrome.runtime.sendMessage({type:'uwf-settings-read',videoToken});
+        if(!current?.ok)throw new Error(current?.error||'Ayarlar yüklenemedi.');
+        previous=current.values;
+        changes=changes(previous);
+      }
+      const keys=Object.keys(changes).filter(key=>framingKeys.has(key)&&changes[key]!==previous[key]);
+      const undo=recordUndo&&keys.length?{context:framingContext(),values:Object.fromEntries(keys.map(key=>[key,previous[key]]))}:null;
+      const response=await chrome.runtime.sendMessage({type:'uwf-settings-write',changes,videoToken});
       if(!response?.ok)throw new Error(response?.error||'Ayarlar kaydedilemedi.');
-      loadSettings();
+      if(undo)framingUndo=undo;else if(!recordUndo)framingUndo=null;
+      return loadSettings();
     }).catch(error=>safeRun(()=>{throw error;}));
+    return saveQueue;
   }
   function saveCategoryScope(category,scope){
     saveQueue=saveQueue.then(async()=>{
@@ -472,9 +595,9 @@
     for(const host of playerPanels){
       const shadow=host.shadowRoot;if(!shadow)continue;
       host.dataset.theme=settings.theme||'dark';
-      const fullFrameButton=shadow.getElementById('fullFramePreset');if(fullFrameButton)fullFrameButton.disabled=!siteAllowed||!host.__uwfVideo?.isConnected;
+      const fullFrameButton=shadow.getElementById('fullFramePreset');if(fullFrameButton){fullFrameButton.disabled=!siteAllowed||!host.__uwfVideo?.isConnected;UwideProfiles.renderFullFrame(fullFrameButton,settings);}
       const compareButton=shadow.getElementById('compareOriginal');if(compareButton){const showingOriginal=comparisonVideo===host.__uwfVideo;compareButton.setAttribute('aria-pressed',String(showingOriginal));compareButton.textContent=showingOriginal?'Uwide kadrajını göster':'Özgün görünümü karşılaştır';compareButton.disabled=!settings.enabled||!siteAllowed||!host.__uwfVideo?.isConnected;}
-      for(const id of panelFields){const input=shadow.getElementById(id);if(!input)continue;const value=settings[id];
+      for(const id of panelFields){const input=shadow.getElementById(id);if(!input)continue;const value=id==='edgeStretch'?(edgePreview.get(host.__uwfVideo)??settings[id]):settings[id];
         if(input.type==='checkbox')input.checked=Boolean(value);else input.value=value;
         const output=shadow.getElementById(`${id}Out`);if(output)output.value=`${['zoom','stretch'].includes(id)?Math.round(Number(value)*100):Number(value)}%`;
       }
@@ -482,6 +605,13 @@
       shadow.getElementById('manualControls').hidden=false;
       shadow.getElementById('customAspectField').hidden=settings.cropAspect!=='custom';
       shadow.getElementById('enabled').disabled=!siteAllowed;
+      shadow.getElementById('undoFraming').disabled=!framingUndo||framingUndo.context!==framingContext();
+      shadow.getElementById('rescanBars').disabled=!settings.enabled||!settings.autoBars;
+      const look=shadow.getElementById('pictureLook');
+      look.value=Array.from(look.options).find(option=>{
+        const preset=globalThis.UwideProfiles.builtins[option.value];
+        return preset&&Object.entries({shadowLift:0,hdr:0,sharpen:0,...preset}).every(([key,value])=>settings[key]===value);
+      })?.value||'custom';
       shadow.getElementById('pictureControls').disabled=!settings.autoPicture;
       shadow.getElementById('pictureControls').hidden=false;
       for(const category of ['framing','bars','picture']){
@@ -514,7 +644,8 @@
       `Karşılaştırma: ${comparisonVideo===video?'Özgün görünüm':'Uwide kadrajı'}`,
       `Site izni: ${siteAllowed?'Açık':'İzinli listesinde yok'}`,
       `Mod: ${settings.mode==='manual'?'Manuel':'Otomatik esnetme'}`,
-      `Video CSS animasyonu: ${animatedStyleProperties(video).join(', ')||'Kadraj özelliklerinde etkin animasyon yok'}`,
+      `Kadraj geçişi: ${matchMedia('(prefers-reduced-motion: reduce)').matches?'Sistem hareketi azaltıyor':document.hidden||holdsFocusFrame()?'Kadraj geçici olarak kilitli':`${frameTiming.duration} ms · ease-in-out`}`,
+      `Oynatıcının CSS animasyonu: ${animatedStyleProperties(video).join(', ')||'Kadraj özelliklerinde etkin animasyon yok'}`,
       `İşleme: ${!settings.enabled?'Kapalı':state?.styleConflict||state?.animationConflict?'Stil/animasyon çakışması nedeniyle bekliyor':state?.framingBlocked?'Boyut sınırı nedeniyle durduruldu':state?'Uygulanıyor':'Bekleniyor'}`,
       `Fare tekeri: ${settings.playerWheelZoom?`${Math.round(settings.wheelScale*100)}%`:'Kapalı'}`,
       `Renk: ${settings.autoPicture?'Açık':'Kapalı'}`,
@@ -567,10 +698,29 @@ fieldset:disabled{opacity:.55}fieldset{min-width:0;margin:13px 0;padding:12px;bo
 #ui-tab-0:focus-visible~.ui-tab-labels label[for="ui-tab-0"],#ui-tab-1:focus-visible~.ui-tab-labels label[for="ui-tab-1"],#ui-tab-2:focus-visible~.ui-tab-labels label[for="ui-tab-2"]{outline:2px solid var(--accent);outline-offset:2px}
 
 .ui-pane>button{margin-block-start:7px}.ui-tabs .ui-tab-pages .ui-pane-1{display:contents}.ui-pane-1>*{display:none}#ui-tab-1:checked~.ui-tab-pages .ui-pane-1>label[for=autoPicture]{display:flex}#ui-tab-1:checked~.ui-tab-pages .ui-pane-1>#pictureControls{display:block}#ui-tab-0:checked~.ui-tab-pages .ui-pane-1>label[for=autoBars]{display:flex}#ui-tab-2:checked~.ui-tab-pages .ui-pane-1>label[for=barsScope]{display:grid}#ui-tab-2:checked~.ui-tab-pages .ui-pane-1>#barsScopeClear{display:block}
-.manual-detail{padding:9px 11px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2)}details{margin-block-start:11px;padding-block-start:9px;border-block-start:1px solid var(--line)}summary{cursor:pointer;padding-block:5px;color:var(--muted);font-size:11px;font-weight:680}pre{max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.55 ui-monospace,Consolas,monospace;color:var(--muted)}.diagnose{width:100%}.compat-status{margin:8px 0;padding:9px 11px;border-inline-start:3px solid #e3ae58;border-radius:8px;background:var(--surface-2);font-size:11px;line-height:1.5}
+#ui-tab-1:checked~.ui-tab-pages .frame-tools{display:grid;gap:4px}.manual-detail{padding:9px 11px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2)}details{margin-block-start:11px;padding-block-start:9px;border-block-start:1px solid var(--line)}summary{cursor:pointer;padding-block:5px;color:var(--muted);font-size:11px;font-weight:680}pre{max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.55 ui-monospace,Consolas,monospace;color:var(--muted)}.diagnose{width:100%}.compat-status{margin:8px 0;padding:9px 11px;border-inline-start:3px solid #e3ae58;border-radius:8px;background:var(--surface-2);font-size:11px;line-height:1.5}
+
+
+.panel .ui-tabs {display:grid;grid-template-columns:62px minmax(0,1fr);align-items:start;gap:12px;margin:0}
+.panel .ui-tab-labels {display:grid;grid-template-columns:1fr;gap:4px;padding:3px 6px 3px 0;margin:0;border:0;border-right:1px solid var(--line);border-radius:0;background:none}
+.panel .ui-tab-labels label {display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-height:54px;margin:0;padding:4px 0;border:0;border-radius:3px;background:none;font-size:10px;font-weight:600}
+.panel .ui-tab-labels svg {width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linejoin:round}
+.panel .ui-tab-pages {min-width:0;margin:0;border:0;border-radius:0;padding:0 4px 4px 0;background:none}
+.panel .ui-tab-input:checked:nth-of-type(1)~.ui-tab-labels label[for=ui-tab-0],.panel .ui-tab-input:checked:nth-of-type(2)~.ui-tab-labels label[for=ui-tab-1],.panel .ui-tab-input:checked:nth-of-type(3)~.ui-tab-labels label[for=ui-tab-2] {background:var(--surface-2);color:var(--accent);box-shadow:inset 3px 0 var(--accent);border:0}
+.panel fieldset {min-width:0;border:0;padding:0;margin:12px 0;background:none}
+.panel select,.panel button {border-radius:4px}
+
+:host(:not([data-theme=light]):not([data-theme=ocean]):not([data-theme=glass])) {--surface:#201f1d;--surface-2:#34312d;--field:#191816;--line:#49453f;--accent:#ffbf71;--accent-strong:#edac5f;--accent-ink:#241b0e;--muted:#c1bbb2;--text:#faf6ee}
+.panel {border-radius:6px;padding:12px;box-shadow:0 10px 32px #0007}
+.panel .top {inset-block-start:-12px;margin:-12px -12px 12px;padding:9px 12px;gap:8px;background:var(--surface)}
+.panel .top h2 {font:italic 600 23px/1 Georgia,serif;letter-spacing:-1px}
+.panel .top .toggle {margin:0;padding:0;border:0;background:none;min-height:32px}
+.panel .field {margin:5px 0 12px}.panel .manual-detail {padding:4px 0;border:0;border-top:1px solid var(--line);border-radius:0;background:none}
+.panel .toggle {background:none;border:0;padding:4px 0;border-radius:0}
+.panel .hint {font-size:11px}.panel .ui-tab-pages {max-height:min(425px,calc(100dvh - 175px))}
 @media(max-height:560px){.panel{max-height:calc(100dvh - 12px)}.ui-tab-pages{max-height:calc(100dvh - 200px)}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
-</style><button class="trigger" type="button" aria-label="Uwide video ayarları" aria-expanded="false" aria-controls="uwidePanel" title="Uwide video ayarları"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"></path></svg></button><section id="uwidePanel" class="panel" role="region" aria-labelledby="panelTitle"><div class="top"><h2 id="panelTitle">Uwide <small>FREE</small></h2><button class="drag-handle" type="button" hidden aria-label="Paneli taşı. Ok tuşlarıyla hareket ettirin; konum seçenekleri için tıklayın." aria-controls="panelPosition" aria-expanded="false">Taşı</button><button class="close" type="button" aria-label="Ayarları kapat">×</button></div><details id="panelPosition"><summary>Panel konumu ve klavye yardımı</summary><p class="hint">Taşı düğmesini sürükleyin veya odaktayken ok tuşlarını kullanın. Shift ile daha küçük adımlar atabilirsiniz. Aşağıdaki düğmeler sürüklemeden taşır. Konum bu sitede saklanır; ekran değişince görünür alana sığdırılır.</p><div class="position-actions"><button type="button" data-move="left">Sola</button><button type="button" data-move="right">Sağa</button><button type="button" data-move="up">Yukarı</button><button type="button" data-move="down">Aşağı</button><button type="button" class="position-reset">Konumu sıfırla</button></div></details><span class="sr-only position-status" role="status"></span><p class="hint compat-status" role="status" hidden></p><label class="toggle" for="enabled"><span>Eklentiyi etkinleştir</span><input id="enabled" type="checkbox"></label><div class="ui-tabs"><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-0" aria-label="Kadraj" aria-controls="ui-pane-0" checked><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-1" aria-label="Görüntü" aria-controls="ui-pane-1" ><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-2" aria-label="Kapsam" aria-controls="ui-pane-2" ><div class="ui-tab-labels"><label for="ui-tab-0">Kadraj</label><label for="ui-tab-1">Görüntü</label><label for="ui-tab-2">Kapsam</label></div><div class="ui-tab-pages"><div class="ui-pane ui-pane-0" id="ui-pane-0" role="region" aria-label="Kadraj"><label class="field" for="mode">Boyutlandırma<select id="mode"><option value="automatic">Otomatik</option><option value="manual">Manuel</option></select></label><label class="field" for="ratio">Yerleşim<select id="ratio"><option value="auto">Alanı kapla · kenarlar kırpılabilir</option><option value="contain">Videonun tamamını sığdır</option><option value="fill">Esnet · yalnızca manuel</option></select></label><label class="field" for="edgeStretch">Kenar ağırlıklı esnetme · yaklaşık<output id="edgeStretchOut" for="edgeStretch"></output><input id="edgeStretch" type="range" min="0" max="100" step="1"></label><p class="hint">Kenarları daha fazla, merkezi daha az genişletir. Sıfırda kapalıdır; yüksek değerler görüntüyü bozabilir ve performansı etkileyebilir.</p><details class="manual-detail"><summary>Manuel kadraj araçları</summary><p class="hint">Bu araçları kullanmak için Boyutlandırma seçeneğini Manuel yapın. Otomatik modda araçlar pasiftir.</p><fieldset id="manualControls"><legend>Manuel kadraj</legend><label class="field" for="zoom">Yakınlaştırma<output id="zoomOut" for="zoom"></output><input id="zoom" type="range" min="1" max="2.5" step="0.01"></label><label class="field" for="panX">Yatay konum<output id="panXOut" for="panX"></output><input id="panX" type="range" min="-50" max="50" step="1"></label><label class="field" for="panY">Dikey konum<output id="panYOut" for="panY"></output><input id="panY" type="range" min="-50" max="50" step="1"></label><label class="field" for="stretch">Yatay esnetme<output id="stretchOut" for="stretch"></output><input id="stretch" type="range" min="1" max="1.6" step="0.01"></label><label class="field" for="frameTrim">Üst ve alt kırpma<output id="frameTrimOut" for="frameTrim"></output><input id="frameTrim" type="range" min="0" max="25" step="0.5"></label><label class="field" for="cropAspect">Kırpma oranı (manuel)<select id="cropAspect"><option value="source">Kaynak oranı · ek kırpma yok</option><option value="16:9">16:9</option><option value="16:10">16:10</option><option value="18:9">18:9</option><option value="21:9">21:9</option><option value="32:9">32:9</option><option value="4:3">4:3</option><option value="1:1">1:1 · kare</option><option value="custom">Özel oran</option></select></label><label id="customAspectField" for="customAspect" hidden>Özel oran · genişlik / yükseklik<input id="customAspect" type="number" min="0.5" max="4" step="0.01" inputmode="decimal" value="2.39"></label></fieldset></details><button id="fullFramePreset" type="button">Tam kare · filtre kapalı</button><button class="reset" type="button">Kadrajı sıfırla</button><button id="compareOriginal" type="button" aria-pressed="false">Özgün görünümü karşılaştır</button><details><summary>Kadraj hakkında</summary><p class="hint">Kaynak videonun içindeki hızlı ışık değişimlerini algılamaz; epilepsi güvenliği garantisi değildir.</p><p class="hint">Bu düğme yalnızca siz bastığınızda özgün görünüm ile Uwide kadrajı arasında geçiş yapar; ayarlarınızı değiştirmez.</p><p class="hint">Otomatik yerleşimde Alanı kapla kenarları kırpabilir; Videonun tamamını sığdır tüm kareyi gösterir ve boşluk bırakabilir. Değişiklikler seçili kayıt kapsamına kaydedilir.</p></details></div><div class="ui-pane ui-pane-1" id="ui-pane-1" role="region" aria-label="Görüntü"><label class="toggle" for="autoPicture"><span>Renk ve parlaklık işlemini uygula (isteğe bağlı)</span><input id="autoPicture" type="checkbox"></label><fieldset id="pictureControls"><legend>Sabit renk ayarları</legend><p class="hint">Anahtarı açın, ardından parlaklık veya diğer değerleri değiştirin. Varsayılan değerler görüntüyü değiştirmez.</p><label class="field" for="brightness">Parlaklık<output id="brightnessOut" for="brightness"></output><input id="brightness" type="range" min="50" max="150" step="1"></label><label class="field" for="contrast">Kontrast<output id="contrastOut" for="contrast"></output><input id="contrast" type="range" min="50" max="150" step="1"></label><label class="field" for="hdr">Parlak alan vurgusu · SDR<output id="hdrOut" for="hdr"></output><input id="hdr" type="range" min="0" max="100" step="1"></label><p class="hint">Statik eğri SDR görüntüde parlak tonları güçlendirir; gerçek HDR çıkışı oluşturmaz. Yüksek değerler ton kayması, kırpma veya GPU yavaşlaması yapabilir.</p><label class="field" for="shadowLift">Sabit gölge kurtarma<output id="shadowLiftOut" for="shadowLift"></output><input id="shadowLift" type="range" min="0" max="30" step="1"></label><p class="hint">Sabit ton eğrisi koyu tonları daha çok açar; etki yaklaşık kalır ve farklı yayınlarda doğrulanmamıştır.</p><label class="field" for="saturation">Doygunluk<output id="saturationOut" for="saturation"></output><input id="saturation" type="range" min="0" max="200" step="1"></label><label class="field" for="vibrance">Seçici canlılık · yaklaşık<output id="vibranceOut" for="vibrance"></output><input id="vibrance" type="range" min="0" max="100" step="1"></label><label class="field" for="sharpen">Sabit keskinleştirme<output id="sharpenOut" for="sharpen"></output><input id="sharpen" type="range" min="0" max="100" step="1"></label><p class="hint">Varsayılan kapalı; yalnızca sabit SVG filtre uygular. Yüksek değerler halo veya yavaşlama yapabilir.</p><p class="hint">Sabit SVG kromatik eğrisi düşük/orta kromayı daha çok güçlendirmeye çalışır; ton kayması veya kırpma olabilir. Varsayılanı sıfırdır; renk işlemi kapalıyken uygulanmaz. Kapalı renk anahtarı bu ayarı da kapatır.</p></fieldset></div><div class="ui-pane ui-pane-2" id="ui-pane-2" role="region" aria-label="Kapsam"><label class="field" for="framingScope">Kadraj kayıt kapsamı<select id="framingScope">${scopeOptionsMarkup}</select></label><button id="framingScopeClear" class="scope-clear" type="button">Kadraj kapsamını kaldır</button><label class="field" for="pictureScope">Görüntü kayıt kapsamı<select id="pictureScope">${scopeOptionsMarkup}</select></label><button id="pictureScopeClear" class="scope-clear" type="button">Görüntü kapsamını kaldır</button></div></div></div><details><summary>Oynatıcı tanılaması</summary><pre class="diagnostics"></pre><button class="diagnose" type="button">Tanılamayı yenile</button></details></section>`;
+</style><button class="trigger" type="button" aria-label="Uwide video ayarları" aria-expanded="false" aria-controls="uwidePanel" title="Uwide video ayarları"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"></path></svg></button><section id="uwidePanel" class="panel" role="region" aria-labelledby="panelTitle"><div class="top"><h2 id="panelTitle">Uwide</h2><label title="Eklentiyi etkinleştir" class="toggle" for="enabled"><span class="sr-only">Eklentiyi etkinleştir</span><input id="enabled" type="checkbox"></label><button class="drag-handle" type="button" hidden aria-label="Paneli taşı. Ok tuşlarıyla hareket ettirin; konum seçenekleri için tıklayın." aria-controls="panelPosition" aria-expanded="false">Taşı</button><button class="close" type="button" aria-label="Ayarları kapat">×</button></div><span class="sr-only position-status" role="status"></span><p class="hint compat-status" role="status" hidden></p><div class="ui-tabs"><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-0" aria-label="Kadraj" aria-controls="ui-pane-0" checked><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-1" aria-label="Görüntü" aria-controls="ui-pane-1" ><input class="ui-tab-input" type="radio" name="uwide-ui-tabs" id="ui-tab-2" aria-label="Kapsam" aria-controls="ui-pane-2" ><div class="ui-tab-labels"><label for="ui-tab-0"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 8V4h5m8 0h5v4M3 16v4h5m8 0h5v-4"/></svg>Kadraj</label><label for="ui-tab-1"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M12 5v14a7 7 0 0 0 0-14" fill="currentColor"/></svg>Görüntü</label><label for="ui-tab-2"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 8 9-5 9 5-9 5zM3 12l9 5 9-5M3 16l9 5 9-5"/></svg>Kapsam</label></div><div class="ui-tab-pages"><div class="ui-pane ui-pane-0" id="ui-pane-0" role="region" aria-label="Kadraj"><label class="field" for="mode">Boyutlandırma<select id="mode"><option value="automatic">Otomatik</option><option value="manual">Manuel</option></select></label><label class="field" for="ratio">Yerleşim<select id="ratio"><option value="auto">Alanı kapla · kenarlar kırpılabilir</option><option value="contain">Videonun tamamını sığdır</option><option value="fill">Esnet · en-boy oranı değişebilir</option></select></label><label class="field" for="edgeStretch">Kenar ağırlıklı esnetme · yaklaşık<output id="edgeStretchOut" for="edgeStretch"></output><input id="edgeStretch" type="range" min="0" max="100" step="1"></label><p class="hint">Kenarları daha fazla, merkezi daha az genişletir. Sıfırda kapalıdır; yüksek değerler görüntüyü bozabilir ve performansı etkileyebilir.</p><details class="manual-detail"><summary>Manuel kadraj araçları</summary><p class="hint">Bu araçları kullanmak için Boyutlandırma seçeneğini Manuel yapın. Otomatik modda araçlar pasiftir.</p><fieldset id="manualControls"><legend>Manuel kadraj</legend><label class="field" for="zoom">Yakınlaştırma<output id="zoomOut" for="zoom"></output><input id="zoom" type="range" min="1" max="2.5" step="0.01"></label><label class="field" for="panX">Yatay konum<output id="panXOut" for="panX"></output><input id="panX" type="range" min="-50" max="50" step="1"></label><label class="field" for="panY">Dikey konum<output id="panYOut" for="panY"></output><input id="panY" type="range" min="-50" max="50" step="1"></label><label class="field" for="stretch">Yatay esnetme<output id="stretchOut" for="stretch"></output><input id="stretch" type="range" min="1" max="1.6" step="0.01"></label><label class="field" for="frameTrim">Üst ve alt kırpma<output id="frameTrimOut" for="frameTrim"></output><input id="frameTrim" type="range" min="0" max="25" step="0.5"></label><label class="field" for="cropAspect">Kırpma oranı (manuel)<select id="cropAspect"><option value="source">Kaynak oranı · ek kırpma yok</option><option value="16:9">16:9</option><option value="16:10">16:10</option><option value="18:9">18:9</option><option value="21:9">21:9</option><option value="32:9">32:9</option><option value="4:3">4:3</option><option value="1:1">1:1 · kare</option><option value="custom">Özel oran</option></select></label><label id="customAspectField" for="customAspect" hidden>Özel oran · genişlik / yükseklik<input id="customAspect" type="number" min="0.5" max="4" step="0.01" inputmode="decimal" value="2.39"></label></fieldset></details><button id="fullFramePreset" type="button">Tam kareye sığdır</button><button class="reset" type="button">Kadrajı sıfırla</button><button id="compareOriginal" type="button" aria-pressed="false">Özgün görünümü karşılaştır</button><details><summary>Kadraj işlemleri</summary><button id="undoFraming" type="button">Son kadraj değişikliğini geri al</button><button id="rescanBars" type="button">Bantları yeniden ölç</button></details><details><summary>Kadraj hakkında</summary><p class="hint">Kaynak videonun içindeki hızlı ışık değişimlerini algılamaz; epilepsi güvenliği garantisi değildir.</p><p class="hint">Bu düğme yalnızca siz bastığınızda özgün görünüm ile Uwide kadrajı arasında geçiş yapar; ayarlarınızı değiştirmez.</p><p class="hint">Otomatik yerleşimde Alanı kapla kenarları kırpabilir; Videonun tamamını sığdır tüm kareyi gösterir ve boşluk bırakabilir. Değişiklikler seçili kayıt kapsamına kaydedilir.</p></details></div><div class="ui-pane ui-pane-1" id="ui-pane-1" role="region" aria-label="Görüntü"><label class="toggle" for="autoPicture"><span>Renk ve parlaklık işlemini uygula (isteğe bağlı)</span><input id="autoPicture" type="checkbox"></label><div class="frame-tools"><button type="button" id="frameToggle">30 → 60 FPS dene</button><div id="frameConsent" hidden><p>Deneysel kare üretimi hızlı harekette çift görüntü veya titreme oluşturabilir. Kaynaktaki flaşlar devam eder. Işığa duyarlı epilepsi açısından güvenliği doğrulanmamıştır.</p><button type="button" id="frameAccept">Bu video için aç</button><button type="button" id="frameCancel">Vazgeç</button></div><small role="status" id="frameStatus"></small></div><fieldset id="pictureControls"><legend>Sabit renk ayarları</legend><label class="field" for="pictureLook">Görüntü modu<select id="pictureLook"><option value="custom" disabled>Özel</option><option value="none">Nötr</option><option value="lift">Hafif</option><option value="movie">Sinema</option><option value="theater">Tiyatro</option><option value="portrait">Doğal ten tonları</option><option value="sport">Spor</option><option value="game">Oyun</option><option value="music">Müzik</option></select></label><p class="hint">Anahtarı açın, ardından parlaklık veya diğer değerleri değiştirin. Varsayılan değerler görüntüyü değiştirmez.</p><label class="field" for="brightness">Parlaklık<output id="brightnessOut" for="brightness"></output><input id="brightness" type="range" min="50" max="150" step="1"></label><label class="field" for="contrast">Kontrast<output id="contrastOut" for="contrast"></output><input id="contrast" type="range" min="50" max="150" step="1"></label><label class="field" for="hdr">Parlak alan vurgusu · SDR<output id="hdrOut" for="hdr"></output><input id="hdr" type="range" min="0" max="100" step="1"></label><p class="hint">Statik eğri SDR görüntüde parlak tonları güçlendirir; gerçek HDR çıkışı oluşturmaz. Yüksek değerler ton kayması, kırpma veya GPU yavaşlaması yapabilir.</p><label class="field" for="shadowLift">Sabit gölge kurtarma<output id="shadowLiftOut" for="shadowLift"></output><input id="shadowLift" type="range" min="0" max="30" step="1"></label><p class="hint">Sabit ton eğrisi koyu tonları daha çok açar; etki yaklaşık kalır ve farklı yayınlarda doğrulanmamıştır.</p><label class="field" for="saturation">Doygunluk<output id="saturationOut" for="saturation"></output><input id="saturation" type="range" min="0" max="200" step="1"></label><label class="field" for="vibrance">Seçici canlılık · yaklaşık<output id="vibranceOut" for="vibrance"></output><input id="vibrance" type="range" min="0" max="100" step="1"></label><label class="field" for="sharpen">Sabit keskinleştirme<output id="sharpenOut" for="sharpen"></output><input id="sharpen" type="range" min="0" max="100" step="1"></label><p class="hint">Varsayılan kapalı; yalnızca sabit SVG filtre uygular. Yüksek değerler halo veya yavaşlama yapabilir.</p><p class="hint">Sabit SVG kromatik eğrisi düşük/orta kromayı daha çok güçlendirmeye çalışır; ton kayması veya kırpma olabilir. Varsayılanı sıfırdır; renk işlemi kapalıyken uygulanmaz. Kapalı renk anahtarı bu ayarı da kapatır.</p></fieldset></div><div class="ui-pane ui-pane-2" id="ui-pane-2" role="region" aria-label="Kapsam"><label class="field" for="framingScope">Kadraj kayıt kapsamı<select id="framingScope">${scopeOptionsMarkup}</select></label><button id="framingScopeClear" class="scope-clear" type="button">Kadraj kapsamını kaldır</button><label class="field" for="pictureScope">Görüntü kayıt kapsamı<select id="pictureScope">${scopeOptionsMarkup}</select></label><button id="pictureScopeClear" class="scope-clear" type="button">Görüntü kapsamını kaldır</button><button id="openFullSettings" class="scope-clear" type="button">Tüm ayarları aç</button><span id="openSettingsStatus" role="status"></span></div></div></div><details id="panelPosition"><summary>Panel konumu ve klavye yardımı</summary><p class="hint">Taşı düğmesini sürükleyin veya odaktayken ok tuşlarını kullanın. Shift ile daha küçük adımlar atabilirsiniz. Aşağıdaki düğmeler sürüklemeden taşır. Konum bu sitede saklanır; ekran değişince görünür alana sığdırılır.</p><div class="position-actions"><button type="button" data-move="left">Sola</button><button type="button" data-move="right">Sağa</button><button type="button" data-move="up">Yukarı</button><button type="button" data-move="down">Aşağı</button><button type="button" class="position-reset">Konumu sıfırla</button></div></details><details><summary>Oynatıcı tanılaması</summary><pre class="diagnostics"></pre><button class="diagnose" type="button">Tanılamayı yenile</button></details></section>`;
 
     const barLabel=document.createElement('label'),barText=document.createElement('span'),barInput=document.createElement('input');
     barLabel.className='toggle';barLabel.htmlFor='autoBars';barText.textContent='Videonun içindeki siyah bantları algıla';barInput.id='autoBars';barInput.type='checkbox';
@@ -651,16 +801,60 @@ fieldset:disabled{opacity:.55}fieldset{min-width:0;margin:13px 0;padding:12px;bo
       const wheelScale=clamp(Math.round((settings.wheelScale+(event.deltaY<0?.0414:-.0414))*10000)/10000,1,2.5);
       if(wheelScale!==settings.wheelScale){const changes={wheelScale};settings={...settings,...changes};apply();saveFraming(changes);}
     },{passive:false});
+    shadow.getElementById('openFullSettings').addEventListener('click',async()=>{
+      const status=shadow.getElementById('openSettingsStatus');
+      try{
+        const result=await chrome.runtime.sendMessage({type:'uwf-open-options'});
+        if(!result?.ok)throw new Error();
+        status.textContent='';
+      }catch{status.textContent='Ayarlar açılamadı. Video sekmesini yenileyip tekrar deneyin.';}
+    });
     close.addEventListener('click',()=>{host.__uwfClose();trigger.focus();});
     host.addEventListener('keydown',event=>{if(event.key==='Escape'&&isOpen()){event.preventDefault();event.stopPropagation();host.__uwfClose();trigger.focus();}},true);
     panel.addEventListener('keydown',event=>event.stopPropagation());
     panel.addEventListener('click',event=>event.stopPropagation());
-    for(const id of panelFields){const input=shadow.getElementById(id);input.addEventListener('change',()=>{const value=input.type==='checkbox'?input.checked:['range','number'].includes(input.type)?Number(input.value):input.value;saveFraming(id==='mode'&&value==='automatic'&&settings.ratio==='fill'?{mode:value,ratio:'auto'}:{[id]:value});});if(input.type==='range')input.addEventListener('input',()=>{const output=shadow.getElementById(`${id}Out`);if(output)output.value=`${['zoom','stretch'].includes(id)?Math.round(Number(input.value)*100):Number(input.value)}%`;});}
+    shadow.getElementById('pictureLook').addEventListener('change',event=>{
+      const preset=globalThis.UwideProfiles.builtins[event.target.value];
+      if(preset)saveFraming({shadowLift:0,hdr:0,sharpen:0,...preset});
+    });
+    const edgeInput=shadow.getElementById('edgeStretch');
+    edgeInput.addEventListener('input',()=>{
+      const video=host.__uwfVideo;
+      if(video){edgePreview.set(video,Number(edgeInput.value));scheduleLayout();}
+    });
+    for(const id of panelFields){const input=shadow.getElementById(id);input.addEventListener('change',()=>{const value=input.type==='checkbox'?input.checked:['range','number'].includes(input.type)?Number(input.value):input.value;const saved=saveFraming({[id]:value});
+      if(id==='edgeStretch'){
+        const video=host.__uwfVideo;
+        saved.finally(()=>{if(edgePreview.get(video)===value){edgePreview.delete(video);scheduleLayout();syncPlayerPanels();}});
+      }});if(input.type==='range')input.addEventListener('input',()=>{const output=shadow.getElementById(`${id}Out`);if(output)output.value=`${['zoom','stretch'].includes(id)?Math.round(Number(input.value)*100):Number(input.value)}%`;});}
     for(const category of ['framing','bars','picture']){shadow.getElementById(`${category}Scope`).addEventListener('change',event=>saveCategoryScope(category,event.target.value));shadow.getElementById(`${category}ScopeClear`).addEventListener('click',()=>clearCategoryScope(category));}
-    shadow.getElementById('fullFramePreset').addEventListener('click',()=>saveFraming({mode:'automatic',autoPicture:false,zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,ratio:'contain',cropAspect:'source',customAspect:2.39,stretch:1,edgeStretch:0,autoBars:false,frameTrim:0,brightness:100,contrast:100,shadowLift:0,saturation:100,vibrance:0,sharpen:0,hdr:0,profile:'fullFrame'}));
+    shadow.getElementById('fullFramePreset').addEventListener('click',()=>saveFraming(UwideProfiles.fullFrameChanges));
     shadow.querySelector('.reset').addEventListener('click',()=>saveFraming({zoom:1,wheelScale:1,shortcutScale:1,panX:0,panY:0,stretch:1,edgeStretch:0,ratio:'auto',cropAspect:'source',customAspect:2.39,autoBars:false,frameTrim:0}));
-    shadow.getElementById('compareOriginal').addEventListener('click',()=>{const video=host.__uwfVideo;if(!video?.isConnected||!settings.enabled||!siteAllowed)return;comparisonVideo=comparisonVideo===video?null:video;apply();syncPlayerPanels();refreshDiagnostics();});
+    shadow.getElementById('compareOriginal').addEventListener('click',()=>{const video=host.__uwfVideo;if(!video?.isConnected||!settings.enabled||!siteAllowed)return;focusReturnUntil=0;comparisonVideo=comparisonVideo===video?null:video;apply();syncPlayerPanels();refreshDiagnostics();});
+    shadow.getElementById('undoFraming').addEventListener('click',()=>{
+      if(framingUndo?.context===framingContext())saveFraming(framingUndo.values,false);
+    });
+    shadow.getElementById('rescanBars').addEventListener('click',()=>{
+      const state=managed.get(host.__uwfVideo);
+      if(!state||!settings.autoBars)return;
+      Object.assign(state,{barLocked:false,barCandidate:null,barCount:0,lastBarSample:0,clipFailed:false,rescanning:true});
+      apply();
+    });
     shadow.querySelector('.diagnose').addEventListener('click',refreshDiagnostics);
+    const toggle=shadow.getElementById('frameToggle'),consent=shadow.getElementById('frameConsent'),status=shadow.getElementById('frameStatus');
+    let stopFrames=null;
+    toggle.onclick=()=>{if(stopFrames)stopFrames();else consent.hidden=false;};
+    shadow.getElementById('frameCancel').onclick=()=>{consent.hidden=true;toggle.focus();};
+    shadow.getElementById('frameAccept').onclick=event=>{
+      if(!event.isTrusted||consent.hidden)return;
+      consent.hidden=true;const target=host.__uwfVideo;
+      status.textContent='Kaynak kare hızı ölçülüyor…';toggle.textContent='Kare üretimini kapat';
+      let ended=false;
+      const stop=UwideFrameGen(target,()=>host.isConnected&&selectedVideo===target&&siteAllowed&&settings.enabled&&!isYouTubeShorts(),(message,done)=>{
+        status.textContent=message;if(done){ended=true;stopFrames=null;toggle.textContent='30 → 60 FPS dene';}
+      });
+      if(!ended)stopFrames=stop;
+    };
     host.__uwfPositionPanel=()=>{if(isOpen())positionPanel();};
     if(fullscreenButton)fullscreenButton.parentElement?.insertBefore(host,fullscreenButton);playerPanels.add(host);syncPlayerPanels();return host;
   }
@@ -670,7 +864,10 @@ fieldset:disabled{opacity:.55}fieldset{min-width:0;margin:13px 0;padding:12px;bo
     if(!panelPositionsReady){if(!panelPositionsLoading){panelPositionsLoading=true;readPanelPositions().catch(()=>{}).then(()=>{panelPositionsReady=true;panelPositionsLoading=false;safeRun(injectPlayerPanels);});}return;}
     const video=activeVideo();if(!video)return;const videoRoot=video.getRootNode(),videoRect=video.getBoundingClientRect();
     const controlSelector='button,[role="button"],.ytp-fullscreen-button,.vjs-fullscreen-control,.jw-icon-fullscreen,[data-plyr="fullscreen"],[data-action*="fullscreen" i],div[class*="fullscreen" i],[aria-label*="fullscreen" i],[title*="fullscreen" i],button[class*="fullscreen" i],[role="button"][class*="fullscreen" i],[data-uia*="fullscreen" i],[data-testid*="fullscreen" i],[data-fullscreen]';
-    let fullscreenButton=null;
+    // Prefer the active HTML5 player even if a second preview overlaps it.
+    const player=video.closest('.mgp_container,.mgp_player,.flowplayer,.fp-player,.video-js,.jwplayer,.plyr,.mejs__container,.mejs-container');
+    const nativeButton=player?.querySelector('.mgp_fullscreen,.mgp_fullScreen,.mgp_fullscreenButton,.fp-fullscreen,.vjs-fullscreen-control,.jw-icon-fullscreen,[data-plyr="fullscreen"],.mejs__fullscreen-button button,.mejs-fullscreen-button button');
+    let fullscreenButton=nativeButton?.parentElement&&nativeButton.getClientRects().length?nativeButton:null;
     // YouTube's right-control rail is stable even while its toolbar fades in
     // and out. Resolve its fullscreen button from the active player first.
     const youtubePlayer=video.closest?.('.html5-video-player');
@@ -702,7 +899,7 @@ fieldset:disabled{opacity:.55}fieldset{min-width:0;margin:13px 0;padding:12px;bo
     for(const root of roots){try{for(const host of root.querySelectorAll('[data-uwf-host]'))knownHosts.add(host);}catch{}}
     for(const host of knownHosts){
       if(!host.isConnected){playerPanels.delete(host);continue;}
-      const matches=host.__uwfVideo===video&&Boolean(host.dataset.uwfFloating)===wantFloating;
+      const matches=host.__uwfVideo===video&&Boolean(host.dataset.uwfFloating)===wantFloating&&(wantFloating||host.parentElement===fullscreenButton.parentElement);
       if(matches&&!keeper)keeper=host;
       else{host.remove();playerPanels.delete(host);}
     }
@@ -724,10 +921,23 @@ fieldset:disabled{opacity:.55}fieldset{min-width:0;margin:13px 0;padding:12px;bo
   loadShortcutConfiguration();
   const observer=new MutationObserver(()=>safeRun(()=>{scanOpenRoots();requestAnimationFrame(()=>safeRun(()=>{apply();injectPlayerPanels()}))}));
   const observeDocument=()=>{if(document.documentElement)observer.observe(document.documentElement,{childList:true,subtree:true});else document.addEventListener('DOMContentLoaded',observeDocument,{once:true});};observeDocument();
-  for(const event of ['play','playing','pause','loadedmetadata','resize','emptied'])document.addEventListener(event,e=>safeRun(()=>{if(e.target instanceof HTMLVideoElement){if(event==='loadedmetadata'||event==='emptied')videoIdentities.delete(e.target);const state=managed.get(e.target);if(state&&!holdsFocusFrame()&&(event==='loadedmetadata'||event==='emptied')){state.clipFailed=false;state.barLocked=false;state.detectedBars=null;state.barCandidate=null;state.barCount=0;state.lastBarSample=0;}requestAnimationFrame(()=>safeRun(apply))}}),true);
+  for(const event of ['play','playing','pause','loadedmetadata','resize','emptied','seeking','seeked','waiting'])document.addEventListener(event,e=>safeRun(()=>{
+    const video=e.target;if(!(video instanceof HTMLVideoElement))return;
+    const state=managed.get(video),signature=location.href+'\n'+video.currentSrc;
+    if((event==='seeking'||event==='waiting')&&state&&video===selectedVideo){
+      seekVideo=video;seekSource=video.currentSrc;seekObject=video.srcObject;seekPage=location.href;seekHold=true;seekReturnUntil=0;focusRepairs=0;
+      if(fullscreenSettleTimer){clearTimeout(fullscreenSettleTimer);fullscreenSettleTimer=0;}
+      set(video,'transition','none');
+    }
+    if((event==='seeked'||event==='playing'&&!video.seeking)&&video===seekVideo){seekHold=false;seekReturnUntil=performance.now()+750;}
+    // emptied is transient during buffering. Reset crop only once metadata
+    // confirms a different source/page, never for a same-video seek.
+    if(event==='loadedmetadata')reconcileMedia(video);
+    requestAnimationFrame(()=>safeRun(apply));
+  }),true);
   window.addEventListener('resize',scheduleLayout);window.visualViewport?.addEventListener('resize',scheduleLayout);window.visualViewport?.addEventListener('scroll',scheduleLayout);window.addEventListener('orientationchange',beginPresentationChange);window.addEventListener('blur',lockFocusFrame);window.addEventListener('focus',resumeFocusFrame);window.addEventListener('pageshow',beginPresentationChange);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')resumeFocusFrame();else lockFocusFrame();});document.addEventListener('fullscreenchange',()=>{if(!focusHold){focusReturnUntil=0;beginPresentationChange();}},true);
   window.addEventListener('popstate',scheduleLayout);document.addEventListener('yt-navigate-finish',scheduleLayout);
 
   setInterval(()=>safeRun(()=>{scanOpenRoots();apply();injectPlayerPanels();}),1500);
-  window.addEventListener('pagehide',event=>{if(!event.persisted)for(const v of [...managed.keys()])restore(v);});
+  window.addEventListener('pagehide',event=>{if(!event.persisted){for(const v of [...managed.keys()])restore(v);for(const [node,state] of captionOffsets)releaseCaption(node,state);captionObserver.disconnect();captionResize?.disconnect();}});
 })();

@@ -13,10 +13,17 @@ async function contextFor(message,sender){
   return {tabId:null,host:''};
 }
 async function notifySettings(){
+  chrome.runtime.sendMessage({type:'uwf-ui-refresh'}).catch(()=>{});
   const tabs=await chrome.tabs.query({});
   await Promise.all(tabs.filter(tab=>Number.isInteger(tab.id)).map(tab=>chrome.tabs.sendMessage(tab.id,{type:'uwf-settings-changed'}).catch(()=>{})));
 }
 chrome.runtime.onMessage.addListener((message,sender,sendResponse)=>{
+  if(message?.type==='uwf-open-options'&&Number.isInteger(sender.tab?.id)){
+    chrome.storage.local.set({optionsTabId:sender.tab.id}).then(()=>chrome.runtime.openOptionsPage()).then(
+      ()=>sendResponse({ok:true}),error=>sendResponse({ok:false,error:error.message})
+    );
+    return true;
+  }
   if(message?.type==='uwf-media-updated'&&sender.tab?.id!==undefined){chrome.runtime.sendMessage({type:'uwf-target-media-changed',tabId:sender.tab.id}).catch(()=>{});return;}
   if(message?.type==='uwf-site-host'){sendResponse({host:siteFromUrl(sender.tab?.url||sender.url)});return;}
   if(!['uwf-settings-read','uwf-settings-write','uwf-settings-scope','uwf-settings-clear','uwf-sites-update'].includes(message?.type))return;

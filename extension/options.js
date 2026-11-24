@@ -41,6 +41,7 @@ function drawSites(){
 }
 function display(){
  for(const id of Object.keys(defaults)){const el=$(id);if(el)el.type==='checkbox'?el.checked=Boolean(values[id]):el.value=values[id];const out=$(id+'-out');if(out)out.value=['zoom','stretch'].includes(id)?`${Math.round(values[id]*100)}%`:`${values[id]}%`;}
+ for(const button of document.querySelectorAll('[data-profile="fullFrame"]'))if(button.dataset.profile==='fullFrame')UwideProfiles.renderFullFrame(button,values);
  document.documentElement.dataset.theme=values.theme;
  $('manual-controls').disabled=values.mode!=='manual';
  $('manual-controls').hidden=values.mode!=='manual';
@@ -121,7 +122,7 @@ async function load(){
  if(profileSyncEnabled)try{await loadSyncedProfiles();}catch(error){status(`Chrome eşitlemesi yüklenemedi; bu cihazdaki profiller korundu. ${error.message}`);}
  display();drawProfiles();drawKeyboardShortcuts();
 }
-for(const id of Object.keys(defaults)){const el=$(id);if(el)el.addEventListener('change',()=>{const value=el.type==='checkbox'?el.checked:['range','number'].includes(el.type)?Number(el.value):el.value;const changes={ [id]:value,profile:'custom' };if(id==='mode'&&value==='automatic'&&values.ratio==='fill')changes.ratio='auto';task(()=>persist(changes));});if(el?.type==='range')el.addEventListener('input',()=>{const out=$(id+'-out');if(out)out.value=['zoom','stretch'].includes(id)?`${Math.round(el.value*100)}%`:`${el.value}%`;});}
+for(const id of Object.keys(defaults)){const el=$(id);if(el)el.addEventListener('change',()=>{const value=el.type==='checkbox'?el.checked:['range','number'].includes(el.type)?Number(el.value):el.value;const changes={ [id]:value,profile:'custom' };task(()=>persist(changes));});if(el?.type==='range')el.addEventListener('input',()=>{const out=$(id+'-out');if(out)out.value=['zoom','stretch'].includes(id)?`${Math.round(el.value*100)}%`:`${el.value}%`;});}
 $('syncCustomProfiles').addEventListener('change',event=>{
  const enabled=event.target.checked;
  task(async()=>{
@@ -140,8 +141,12 @@ $('keyboard-shortcuts-enabled').addEventListener('change',event=>task(async()=>{
 for(const button of document.querySelectorAll('[data-shortcut-capture]')){
  const action=button.dataset.shortcutCapture;
  button.addEventListener('click',()=>{capturingShortcut=capturingShortcut===action?null:action;drawKeyboardShortcuts();$('shortcut-status').textContent=capturingShortcut?'Şimdi Ctrl, Alt veya Meta ile birlikte kullanılacak bir tuş girin. Esc vazgeçer.':'';});
+ button.addEventListener('blur',()=>{
+  if(capturingShortcut===action){capturingShortcut=null;drawKeyboardShortcuts();$('shortcut-status').textContent='Kısayol ataması iptal edildi.';}
+ });
  button.addEventListener('keydown',event=>{
   if(capturingShortcut!==action||event.isComposing)return;
+  if(event.key==='Tab')return;
   event.preventDefault();event.stopPropagation();
   if(event.code==='Escape'){capturingShortcut=null;drawKeyboardShortcuts();$('shortcut-status').textContent='Kısayol ataması iptal edildi.';return;}
   const binding={code:event.code,ctrl:event.ctrlKey,alt:event.altKey,shift:event.shiftKey,meta:event.metaKey};
@@ -174,10 +179,10 @@ $('site-mode').addEventListener('change',event=>task(()=>changeSites({mode:event
 $('site-add').addEventListener('click',()=>task(()=>changeSites({action:'add'},'Açık site listeye eklendi.')));
 $('site-remove').addEventListener('click',()=>{const site=$('site-list').value;if(site)task(()=>changeSites({action:'remove',site},`${site} listeden kaldırıldı.`));});
 document.querySelectorAll('[data-profile]').forEach(button=>button.addEventListener('click',()=>task(async()=>{
-  const id=button.dataset.profile,changes={...UwideProfiles.snapshot(UwideProfiles.builtins[id]),profile:id};
-  if(id==='fullFrame')Object.assign(changes,{autoPicture:false,brightness:100,contrast:100,hdr:0,shadowLift:0,saturation:100,vibrance:0,sharpen:0});
+  const id=button.dataset.profile;
+  const changes=id==='fullFrame'?UwideProfiles.fullFrameChanges(values):{shadowLift:0,hdr:0,sharpen:0,...UwideProfiles.builtins[id],profile:id};
   await persist(changes);
-  status(id==='fullFrame'?'Tam kare görünüm uygulandı; renk filtresi kapalı.':'Renk profili uygulandı.');
+  status(id==='fullFrame'?button.textContent:'Renk profili uygulandı.');
 })));
 $('profile-form').addEventListener('submit',event=>{event.preventDefault();task(async()=>{
  if(profiles.length>=30){status('En fazla 30 profil saklanabilir. Önce bir profili silin.');return;}
@@ -209,8 +214,15 @@ $('transfer-form').addEventListener('submit',event=>{
   }catch(error){input.setCustomValidity(error.message);input.setAttribute('aria-invalid','true');$('transfer-status').textContent=error.message;input.reportValidity();input.focus();}
  });
 });
-chrome.runtime.onMessage.addListener(message=>{if(message?.type==='uwf-target-media-changed'&&message.tabId===tabId)task(async()=>{currentScope=await UwideClient.request(tabId);values=currentScope.values;display();});});
+chrome.runtime.onMessage.addListener(message=>{if(message?.type==='uwf-ui-refresh'||(message?.type==='uwf-target-media-changed'&&message.tabId===tabId))task(async()=>{currentScope=await UwideClient.request(tabId);values=currentScope.values;display();});});
 chrome.storage.onChanged.addListener((changes,areaName)=>{
+ if(areaName==='local'&&changes.optionsTabId){
+  const nextTab=changes.optionsTabId.newValue??null;
+  task(async()=>{
+   const nextScope=await UwideClient.request(nextTab);
+   tabId=nextTab;currentScope=nextScope;host=nextScope.host;values=nextScope.values;display();
+  });
+ }
  if(areaName!=='sync'||profileSyncWrite)return;
  const changedPreference=Object.hasOwn(changes,'syncCustomProfiles'),changedProfiles=Object.keys(changes).some(key=>key===profileSyncIndexKey||key===profileSyncReadyKey||key.startsWith(profileSyncPrefix));
  const changedShortcuts=Object.hasOwn(changes,'keyboardShortcutConfig');if(changedShortcuts){chrome.storage.sync.get({keyboardShortcutConfig:null}).then(result=>{keyboardShortcutConfig=normalizeShortcutConfig(result.keyboardShortcutConfig);drawKeyboardShortcuts();});}

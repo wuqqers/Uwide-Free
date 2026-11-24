@@ -1,6 +1,27 @@
 # Uwide Free
 
-## 0.4.82
+## 0.4.90
+
+Experimental frame blending can be enabled for the current video under Picture. It targets 60 presentations per second on steady 30 fps sources up to 1080p, using a blended midpoint only between similar frames. Motion can show double edges. Start requires explicit consent each time. Pause, seek, focus loss or sustained timing problems stop processing. Photosensitivity safety and sustained 60 fps on live platforms have not been established.
+
+
+## 0.4.85
+
+- Keep standard YouTube DOM caption windows inside the player with an 8px margin when they overflow its edges. Preserve caption text, timing and accessibility attributes; video framing is unchanged by subtitle cues.
+- Recheck on caption/layout changes and restore owned positioning when protection is no longer needed or the extension is disabled.
+- Applies to standard separate YouTube captions that fit within the player. Burned-in subtitles, oversized captions and captions with a player-owned CSS translate are not covered.
+- Chromium fixture passed bounds, resize, restoration, disable cleanup and text/ARIA preservation checks. Live YouTube verification remains pending.
+
+
+## 0.4.84
+
+- Preserve the current framing during waiting/buffering even without a seek event; resume layout when playback returns.
+- Detect page/source changes during normal updates, so reused video elements cannot retain the previous video's detected bars when no metadata event arrives.
+- Distinguish replacement MediaStreams by object identity even when currentSrc is empty, including focus/seek holds and per-video storage identity.
+- Synthetic Chromium checks passed for buffering, pause, SPA navigation, stream replacement, seeking and focus recovery. Live platform and quality-switch behavior still requires confirmation.
+
+
+## 0.4.83
 
 - Include the focus-frame hold from 0.4.81.
 - Keep manual controls visible but disabled in automatic mode, with instructions for enabling manual sizing.
@@ -47,7 +68,7 @@ Wuqqers · https://www.omerkayaekici.com/tr/
 
 ## Load locally
 
-1. Extract `Uwide-Free-Chromium-0.4.82.zip`.
+1. Extract `Uwide-Free-Chromium-0.4.100.zip`.
 2. Open chrome://extensions, enable Developer mode and choose Load unpacked.
 3. Select the extracted folder and refresh the video tab.
 4. Open Uwide beside the player's fullscreen control. The extension has no toolbar popup action.

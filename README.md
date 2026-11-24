@@ -4,7 +4,7 @@
 
 **Developer:** [Wuqqers](https://www.omerkayaekici.com/tr/)
 **Languages:** Turkish and English
-**Current release:** 0.4.82
+**Current release:** 0.4.100
 **Browsers:** Chrome and Chromium based browsers, version 119 or newer
 
 Uwide Free is source available under a custom license. You may use, modify, and redistribute it for free, including at work. Selling the extension or a modified or derivative version is prohibited. See [LICENSE](LICENSE) for the complete terms. This is not an OSI approved open source license.
@@ -27,7 +27,7 @@ Uwide Free is source available under a custom license. You may use, modify, and 
 
 Chrome Web Store publication is not provided. Install the extension locally:
 
-1. Download `Uwide-Free-Chromium-0.4.82.zip` from the repository's **Releases** page and extract it to a folder. Alternatively, download the repository and use its `extension` folder.
+1. Download `Uwide-Free-Chromium-0.4.100.zip` from the repository's **Releases** page and extract it to a folder. Alternatively, download the repository and use its `extension` folder.
 2. Open `chrome://extensions` in Chrome or `edge://extensions` in Edge.
 3. Turn on **Developer mode**.
 4. Click **Load unpacked** and select the folder that contains `manifest.json` (the extracted release folder or the repository's `extension` folder).
@@ -76,7 +76,7 @@ Before contributing, read [CONTRIBUTING.md](CONTRIBUTING.md). Contributions are 
 
 **Geliştirici:** [Wuqqers](https://www.omerkayaekici.com/tr/)
 **Diller:** Türkçe ve İngilizce
-**Güncel sürüm:** 0.4.82
+**Güncel sürüm:** 0.4.100
 **Tarayıcılar:** Chrome ve Chromium tabanlı tarayıcılar, sürüm 119 veya üstü
 
 Uwide Free, özel bir lisans altında kaynak kodu erişilebilir bir yazılımdır. İş yerinde kullanım da dahil olmak üzere ücretsiz kullanabilir, değiştirebilir ve ücretsiz dağıtabilirsiniz. Eklentinin veya değiştirilmiş/türetilmiş sürümlerinin satışı yasaktır. Tam koşullar için [LICENSE](LICENSE) dosyasını okuyun. Bu lisans OSI onaylı bir açık kaynak lisansı değildir.
@@ -96,7 +96,7 @@ Uwide Free, özel bir lisans altında kaynak kodu erişilebilir bir yazılımdı
 
 Chrome Web Mağazası yayını sunulmuyor. Eklentiyi bilgisayarınıza elle yükleyin:
 
-1. Depodaki **Releases** bölümünden `Uwide-Free-Chromium-0.4.82.zip` dosyasını indirin ve bir klasöre çıkarın. Alternatif olarak depoyu indirin ve içindeki `extension` klasörünü kullanın.
+1. Depodaki **Releases** bölümünden `Uwide-Free-Chromium-0.4.100.zip` dosyasını indirin ve bir klasöre çıkarın. Alternatif olarak depoyu indirin ve içindeki `extension` klasörünü kullanın.
 2. Chrome'da `chrome://extensions`, Edge'de `edge://extensions` adresini açın.
 3. **Geliştirici modu** seçeneğini açın.
 4. **Paketlenmemiş öğe yükle** düğmesine basıp `manifest.json` dosyasını içeren klasörü seçin (çıkarılmış paket klasörü veya depodaki `extension` klasörü).
